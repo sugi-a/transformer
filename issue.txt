@@ -1,0 +1,4 @@
+- change the buffer size for shuffling dataset to a bigger value
+- fix the bug in BLEU evaluation
+- test Graph.finalize()
+- find and try a way of evaluating on dev dataset without feedable initializer
