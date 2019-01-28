@@ -37,14 +37,20 @@ class Config:
     target_train = '/disk/sugi/dataset/ASPEC/train/train-1.ja.txt'
     source_dev = '/disk/sugi/dataset/ASPEC/dev/dev.en.txt'
     target_dev = '/disk/sugi/dataset/ASPEC/dev/dev.ja.txt'
+#    source_test = '/disk/sugi/dataset/ASPEC/test/test.en.min.txt'
+#    target_test = '/disk/sugi/dataset/ASPEC/test/test.ja.min.txt'
     source_test = '/disk/sugi/dataset/ASPEC/test/test.en.txt'
     target_test = '/disk/sugi/dataset/ASPEC/test/test.ja.txt'
 
     # tokenized dataset
     source_train_tok = _SP_model_dir + '/train/train-1.en.tok'
     target_train_tok = _SP_model_dir + '/train/train-1.ja.tok'
+#    source_train_tok = _SP_model_dir + '/train/train-mini.en.tok'
+#    target_train_tok = _SP_model_dir + '/train/train-mini.ja.tok'
     source_dev_tok = _SP_model_dir + '/dev/dev.en.tok'
     target_dev_tok = _SP_model_dir + '/dev/dev.ja.tok'
+#    source_test_tok = _SP_model_dir + '/test/test.en.min.tok'
+#    target_test_tok = _SP_model_dir + '/test/test.ja.min.tok'
     source_test_tok = _SP_model_dir + '/test/test.en.tok'
     target_test_tok = _SP_model_dir + '/test/test.ja.tok'
 
@@ -62,62 +68,68 @@ class Config:
     SOS_ID = 2
     EOS_ID = 3
 
-    def tokenize_source(source_sents):
+    def tokenize_source(source_sents, as_pieace=False):
         """tokenize sentences into sequences of IDs
         
         Args:
             source_sents: list of str
             
         Returns:
-            list of 1D numpy array of int"""
+            list of list of int"""
         
         #in this model_config.py source=en
         sp = spm.SentencePieceProcessor()
-        sp.Load(_SP_model_file_source)
-        return [np.array(sp.EncodeAsIds(sent)) for sent in source_sents]
+        sp.Load(Config._SP_model_file_source)
+        if as_pieace:
+            return [sp.EncodeAsPieces(sent) for sent in source_sents]
+        else:
+            return [sp.EncodeAsIds(sent) for sent in source_sents]
 
-    def tokenize_target(target_sents):
+    def tokenize_target(target_sents, as_pieace=False):
         """tokenize target sentences into sequences of IDs
         
         Args:
             target_sents: list of str
             
         Returns:
-            list of 1D numpy array of int"""
+            list of list of int"""
         #in this model_config.py target=ja
         sp = spm.SentencePieceProcessor()
-        sp.Load(_SP_model_file_target)
-        return [np.array(sp.EncodeAsIds(sent)) for sent in target_sents]
+        sp.Load(Config._SP_model_file_target)
+        if as_pieace:
+            return [sp.EncodeAsPieces(sent) for sent in target_sents]
+        else:
+            return [sp.EncodeAsIds(sent) for sent in target_sents]
 
     def detokenize_source(source_seqs):
         """detokenize source sequence of IDs to strings
         
         Args:
-            source_seqs: list of 1D numpy array of int
+            source_seqs: list of list of int
         
         Returns:
             list of str"""
 
         #in this model_config.py source=en
         sp = spm.SentencePieceProcessor()
-        sp.Load(_SP_model_file_source)
+        sp.Load(Config._SP_model_file_source)
         return [sp.DecodeIds(seq) for seq in source_seqs]
     
     def detokenize_target(target_seqs):
         """detokenize target sequence of IDs to strings
         
         Args:
-            target_seqs: list of 1D numpy array of int
+            target_seqs: list of list of int
         
         Returns:
             list of str"""
 
         #in this model_config.py target=en
         sp = spm.SentencePieceProcessor()
-        sp.Load(_SP_model_file_target)
+        sp.Load(Config._SP_model_file_target)
         return [sp.DecodeIds(seq) for seq in target_seqs]
 
-    def blue_tokenize_source(source_sents):
+    def bleu_tokenize_source(source_sents):
         """tokenize source sentences for BLEU evaluation.
         Japanese texts are tokenized by kytea.
         Texts in languages which use space as delimiter are tokenized
@@ -133,7 +145,7 @@ class Config:
         #in this model_config.py source=en. so split by " "
         return [sent.split() for sent in source_sents]
 
-    def blue_tokenize_target(target_sents):
+    def bleu_tokenize_target(target_sents):
         """tokenize target sentences for BLEU evaluation.
         Japanese texts are tokenized by kytea.
         Texts in languages which use space as delimiter are tokenized
@@ -147,11 +159,11 @@ class Config:
             ret[i] is the list of str for the i-th sentence"""
 
         #in this model_config.py target=ja. so split by kytea
-        kytea_input = "\n".join(target_sents)
-        kytea_output = subprocess.run(["kytea", "-notags"], 
-                        input=kytea_input,
-                        stdout=subprocess.PIPE,
-                        text=True).stdout
+        #kytea needs \n at the end of the input data
+        kytea_input = "\n".join(target_sents) + "\n"
+        kytea_output = subprocess.check_output(["kytea", "-notags"], 
+                                               input=kytea_input.encode())\
+            .decode().strip() #remove \n at the end of output
         return [line.split() for line in kytea_output.split("\n")]
 
 # preprocessing
