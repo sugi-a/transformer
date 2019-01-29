@@ -60,7 +60,7 @@ train_source = _file_to_ID_seq(model_config.Config.source_train_tok,
 train_target = _file_to_ID_seq(model_config.Config.target_train_tok,
                                model_config.Config.vocab_target)
 train_data = tf.data.Dataset.zip((train_source, train_target))\
-    .shuffle(buffer_size=10000)\
+    .shuffle(buffer_size=100000)\
     .padded_batch(model_config.Hyperparams.batch_size,
                   (([None], []), ([None], [])),
                   ((conf.PAD_ID, 0), (conf.PAD_ID, 0)))\
@@ -123,7 +123,8 @@ mean_loss = batch_loss / n_batch_tokens
 
 # optimizer
 optimizer = tf.train.AdamOptimizer(learning_rate=hp.lr, beta1=0.9, beta2=0.98, epsilon=1e-8)
-train_op = optimizer.minimize(mean_loss)
+global_step_var = tf.Variable(0, trainable=False, name="global_step", dtype=tf.int32)
+train_op = optimizer.minimize(mean_loss, global_step_var)
 
 """ make directories """
 summary_dir = conf.logdir + '/summary'
@@ -133,7 +134,7 @@ for p in [conf.logdir, summary_dir, checkpoint_dir]:
         os.mkdir(p)
 
 # saver
-saver = tf.train.Saver()
+saver = tf.train.Saver(max_to_keep=12)
 
 # summary
 train_summary_op = tf.summary.merge([
@@ -145,22 +146,27 @@ summary_writer = tf.summary.FileWriter(summary_dir)
 #Inferencer
 inferencer = inference.Inference()
 
+#mutable-nodes initializers
+table_initializer = tf.tables_initializer()
+variable_initializer = tf.global_variables_initializer()
+
+#close the graph
+tf.get_default_graph().finalize()
+
 #session config
 config = tf.ConfigProto()
 config.gpu_options.allow_growth = True
 #config.log_device_placement = True
 
-table_initializer = tf.tables_initializer()
 with tf.Session(config=config) as sess:
-    #debug
-#    sess = tf_debug.LocalCLIDebugWrapperSession(sess)
     print("session start")
     # restore or initialize variables
+    sess.run(global_step_var.initializer)
     latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
     if latest_checkpoint is not None:
         saver.restore(sess, latest_checkpoint)
     else:
-        sess.run(tf.global_variables_initializer())
+        sess.run(variable_initializer)
 
     #initialize tables
     print("initializing tables")
@@ -181,8 +187,9 @@ with tf.Session(config=config) as sess:
                                         feed_dict={handle: dev_handle}))
             except tf.errors.OutOfRangeError:
                 break
+        n_batches = len(result)
         result = np.sum(result, axis=0)
-        return result[1]/result[0], result[2]/result[0]
+        return result[1]/result[0], result[2]/n_batches
         
     def custom_summary(tag_value):
         return tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value) for tag, value in tag_value])
@@ -192,7 +199,7 @@ with tf.Session(config=config) as sess:
     no_improve_count = 0
 
     # global step
-    global_step = 0
+    global_step = sess.run(global_step_var)
     epoch = 0
 
     while True:
@@ -207,6 +214,9 @@ with tf.Session(config=config) as sess:
             bleu = inferencer.BLEU_evaluation_with_test_data(1, latest_checkpoint)
         else:
             bleu = 0
+
+        #epoch summary
+        summary_writer.add_summary(custom_summary([['BLEU', bleu]]), global_step)
 
         # print log
         print("{{'epoch': {}, 'dev_acc': {}, 'dev_loss': {}, 'BLEU': {}, 'time': '{}'}},"
@@ -238,8 +248,8 @@ with tf.Session(config=config) as sess:
             try:
                 if(global_step % 100 == 0):
                     # train and get summary on training data
-                    train_summary, _ = sess.run(
-                        [train_summary_op, train_op],
+                    train_summary, global_step, _ = sess.run(
+                        [train_summary_op, global_step_var, train_op],
                         feed_dict={handle: train_handle})
 
                     #write summary on train data
@@ -253,21 +263,19 @@ with tf.Session(config=config) as sess:
                         global_step)
 
                     #display training info
-                    sys.stdout.write("local step:{}, local time elapsed:{}"\
-                        ", time per step:{}, global step:{}\r".format(
+                    sys.stdout.write("local step:{}, local time:{}"\
+                        ", t/s:{}, global step:{} \r".format(
                         local_step,
                         time.time() - local_time_start,
                         (time.time()-local_time_start)/local_step if local_step>0 else "-",
                         global_step
                     ))
                 else:
-                    sess.run(train_op, feed_dict={handle: train_handle})
+                    global_step, _ = sess.run([global_step_var, train_op],
+                                              feed_dict={handle: train_handle})
 
-                global_step = global_step + 1
                 local_step = local_step + 1
             except tf.errors.OutOfRangeError:
-                global_step = global_step + 1
-                local_step = local_step + 1
                 break
 
         #save parameters after each epoch

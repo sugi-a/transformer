@@ -1,4 +1,12 @@
-- change the buffer size for shuffling dataset to a bigger value
-- fix the bug in BLEU evaluation
-- test Graph.finalize()
-- find and try a way of evaluating on dev dataset without feedable initializer
+ - change the buffer size for shuffling dataset to a bigger value
+    - done (buffer size was set to 100,000)
+ - fix the bug of dev_accuracy
+    - done
+ - fix the bug in BLEU evaluation
+    - done
+ - test Graph.finalize()
+    - done
+ - find and try a way of evaluating on dev dataset without feedable initializer
+ - try sp32000
+    - done
+ - added global step variable

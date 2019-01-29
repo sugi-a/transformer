@@ -263,6 +263,7 @@ class Encoder(object):
                                                n_units=4*hparams.embed_size,
                                                dropout_rate=hparams.dropout_rate,
                                                is_training=is_training)
+            self.hidden_states = self.outputs
 
 class Decoder(object):
     """docstring for Decoder"""

@@ -23,6 +23,59 @@ import model_config
 print("model_config has been loaded from {}".format(model_config.__file__))
 from model_config import Config as conf
 
+def make_dataset_from_tok_file(tok_data_file, vocab_file_name, graph=None):
+    """make a dataset input to the encoder
+    
+    Args:
+        tok_data_file: shape (), dtype: tf.string. string must be stripped
+        vocab_file_name: name of vocabulary file
+        graph: graph in which the token-to-ID lookup table is placed
+        
+    Returns:
+        dataset:
+            tuple of ID sequence and its length. EOS is added.
+            shape: ([None], []), dtype: (tf.int32, tf.int32)"""
+
+    if graph is None:
+        graph = tf.get_default_graph()
+
+    with graph.as_default():
+        table = tf.contrib.lookup.index_table_from_file(
+                vocab_file_name,
+                num_oov_buckets=0,
+                default_value=conf.UNK_ID,
+                key_column_index=0)
+        return tf.data.TextLineDataset(tok_data_file)\
+            .map(lambda line: tf.string_split([line]).values)\
+            .map(lambda tokens: tf.cast(table.lookup(tokens), tf.int32))\
+            .map(lambda seq: tf.concat( #adding EOS ID
+                [seq, tf.ones([1], tf.int32)*model_config.Config.EOS_ID], axis=0))\
+            .map(lambda seq: (seq, tf.shape(seq)[0]))
+
+def make_dataset_from_texts(texts, vocab_file_name, graph=None):
+    """make a dataset input to the encoder
+    
+    Args:
+        texts: list of str. texts must not contain \n
+        vocab_file_name: name of the vocabulary file
+        graph: graph in which the dataset is made
+    Returns:
+        dataset: tuple of ID sequence and its length. EOS is added to the seq.
+        shape: ([None], []), dtype: (tf.int32, tf.int32)"""
+
+    if graph is None:
+        graph = tf.get_default_graph()
+
+    texts = [line.strip() for line in texts]
+    seqs = conf.tokenize_source(texts)
+
+    with graph.as_default():
+        return tf.data.Dataset.from_generator(lambda:seqs,
+                                              tf.int32, tf.TensorShape([None]))\
+            .map(lambda seq: tf.concat( #adding EOS ID
+                [seq, tf.ones([1], tf.int32)*model_config.Config.EOS_ID], axis=0))\
+            .map(lambda seq: (seq, tf.shape(seq)[0]))
+
 class Inference:
     def __init__(self, graph=None, checkpoint=None): 
         """Build translator
@@ -209,6 +262,7 @@ class Inference:
                         position = position + 1
 
                     ret_cands.extend(list(beam_cands))
+            print("translation done.")
             return ret_cands
 
     def get_n_best_for_dataset(self, dataset, n, feed_dict=None, checkpoint=None):
@@ -243,12 +297,16 @@ class Inference:
                 (conf.PAD_ID, 0)
             ).prefetch(1)
 
-            config = tf.ConfigProto()
-            config.gpu_options.allow_growth = True
+            #additional op nodes
+            #scores:[N, n], IDs:[N, n]
+            top_n_scores_op, top_n_IDs_op = tf.math.top_k(self.last_pos_softmax, n, False)
 
             #the list to be returned
             ret_cands = []
             ret_scores = []
+
+            config = tf.ConfigProto()
+            config.gpu_options.allow_growth = True
 
             with tf.Session(config=config) as sess:
                 #initialize tables
@@ -260,21 +318,13 @@ class Inference:
                 #initialize input iterator
                 sess.run(self.inputs_itr.make_initializer(dataset), feed_dict=feed_dict)
 
-                #debug
-                itr = dataset.make_initializable_iterator()
-                nxt = itr.get_next()
-                sess.run(itr.initializer, feed_dict={})
-                print(sess.run(nxt))
-
-
-
                 #run encoder
                 encoder_outputs = []
                 encoder_masks = []
                 while True:
                     try:
                         enc_hidden_states_batch, enc_mask_batch = sess.run(
-                            [self.encoder.outputs, self.encoder.enc_mask],
+                            [self.encoder.hidden_states, self.encoder.enc_mask],
                             feed_dict=feed_dict
                         )
                         encoder_outputs.extend(enc_hidden_states_batch)
@@ -294,7 +344,8 @@ class Inference:
 
                     #log
                     time_elapsed = time.time() - start_time
-                    time_remaining = 100000 if step==0 else time_elapsed / step * n_samples
+                    step_remaining = n_samples - step
+                    time_remaining = 100000 if step==0 else time_elapsed / step * step_remaining
                     sys.stdout.write("translating {}-th sent. finished in {} sec\r".format(
                         step, time_remaining))
                     step = step + 1
@@ -311,24 +362,21 @@ class Inference:
                         #make batch of candidates without EOS
                         batch = np.stack(beam_cands[np.logical_not(beam_has_EOS)], axis=0) #[c, pos]
                         #calc probability distribution
-                        softmax_outputs = sess.run(self.decoder.softmax_outputs, 
+#                        softmax_outputs = sess.run(self.decoder.softmax_outputs, 
+                        top_n_IDs, top_n_scores = sess.run([top_n_IDs_op, top_n_scores_op], 
                                  feed_dict={self.enc_hidden_states_ph: enc_hidden_states,
                                             self.enc_mask_ph: enc_mask,
                                             self.dec_inputs_ph: batch,
                                             self.dec_lengths_ph: position+1}) #[c, pos+1, Vocab]
 
-                        #target distributions for the batch
-                        targets = softmax_outputs[:, position] #[c, Vocab]
-                        nbest_IDs = np.argsort(targets, axis=1)[::-1][:, :n] #[c, n]
-                        nbest_scores = np.take_along_axis(targets, nbest_IDs, axis=1) #[c, n]
                         #update candidate seqs and scores in the batch
                         extendeds = np.concatenate([
                             np.repeat(batch, n, axis=0), #[c*n, pos]
-                            np.reshape(nbest_IDs, [-1, 1]) #[c*n, 1]
+                            np.reshape(top_n_IDs, [-1, 1]) #[c*n, 1]
                         ], axis=1) #[c*n, pos+1]
                         extended_scores =\
                             np.repeat(beam_scores[np.logical_not(beam_has_EOS)], n)\
-                            + np.log(np.reshape(nbest_scores, [-1]) + np.finfo(np.float).eps) #[c*n]
+                            + np.log(np.reshape(top_n_scores, [-1]) + np.finfo(np.float).eps) #[c*n]
                         extended_has_EOS = np.equal(extendeds[:, position], conf.EOS_ID)
 
                         #update beam candidates
@@ -349,56 +397,70 @@ class Inference:
                         if np.all(beam_has_EOS):
                             break
                         elif position > len(enc_hidden_states[0]) * 2:
-                            beam_cands[:, position] = conf.EOS_ID
+                            for seq in beam_cands[np.logical_not(beam_has_EOS)]:
+                                seq[position] = conf.EOS_ID
                             beam_scores[np.logical_not(beam_has_EOS)] = -np.inf
                             beam_has_EOS[np.logical_not(beam_has_EOS)] = True
                             break
 
                         position = position + 1
 
-                    ret_cands.append(beam_cands.tolist())
-                    ret_scores.append(beam_scores.tolist())
+                    ret_cands.append(list(beam_cands))
+                    ret_scores.append(list(beam_scores))
+            print("translation done.")
             return (ret_cands, ret_scores)
 
-    def get_n_best_for_2D_array(self, array, n, checkpoint=None):
-        """translate each sentence in 2D int numpy array into n candidates
+    def translate_sentences(self, sentences, beam_width=1, checkpoint=None):
+        """translate sentences
         
         Args:
-            n: beam width
-            array: 2D numpy array with type int
+            sentences: list of str. white spaces at the end of sentences will be
+                removed before translation.
+        
         Returns:
-            a tuple (candidates, scores)
-            candidates:
-                a list of list of numpy array.
-                candidates[j][i] is the i-th candidate for the j-th source sentence
-            scores:
-                list of list of float scores
-                scores correspond to the candidates
-        """
-        data_ph = tf.placeholder(tf.int32, [None, None])
-        dataset = tf.data.Dataset.from_tensor_slices(data_ph)
-        return self.get_n_best_for_dataset(dataset, n, feed_dict={data_ph: array}, checkpoint=checkpoint)
+            translations. list of str"""
 
-    def BLEU_evaluation_with_test_data(self, beam_width=1, checkpoint=None):
+        #make sure sentences don't have \n at the ends
+        sentences = [sent.strip() for sent in sentences]
+
+        dataset = make_dataset_from_texts(sentences, conf.vocab_source, self.graph)
+
+        if beam_width == 1:
+            translations = self.get_1_best_for_dataset(dataset, checkpoint=checkpoint)
+        else:
+            translations, _ = self.get_n_best_for_dataset(dataset, beam_width, checkpoint=checkpoint)
+            translations = [cands[0] for cands in translations]
+
+        #detokenize
+        translations = [seq.tolist() for seq in translations]
+        translations = conf.detokenize_target(translations)
+
+        return translations
+
+    def translate_file(self, file_name, beam_width=1, checkpoint=None):
+        """translate sentences in a file.
+        sentence must not be tokenized. This method makes Dataset AFTER tokenizing the sentences (tokenization is not included in the Dataset pipeline)
+        
+        Returns:
+            list of str"""
+        with codecs.open(file_name, "r", "utf-8") as f:
+           return self.translate_sentences(f.readlines(), beam_width, checkpoint)
+
+    def BLEU_evaluation_with_test_data(self, beam_width=1, checkpoint=None,
+                                       source_tok_file=None, target_raw_file=None):
         """Perform evaluation with BLEU metric using the test data"""
-        def _file_to_ID_seq(filename, vocab_file_name):
-            """load file into dataset"""
-            #This lookup table must surely be added to this Inference object's graph
-            with self.graph.as_default():
-                table = tf.contrib.lookup.index_table_from_file(
-                        vocab_file_name,
-                        num_oov_buckets=0,
-                        default_value=conf.UNK_ID,
-                        key_column_index=0)
-                return tf.data.TextLineDataset(filename)\
-                .map(lambda line: tf.string_split([line]).values)\
-                .map(lambda tokens: tf.cast(table.lookup(tokens), tf.int32))\
-                .map(lambda seq: tf.concat( #adding EOS ID
-                    [seq, tf.ones([1], tf.int32)*model_config.Config.EOS_ID], axis=0))\
-                .map(lambda seq: (seq, tf.shape(seq)[0]))
+
+        #source and target files. source file must be tokenized
+        assert (source_tok_file is None) == (target_raw_file is None)
+        if source_tok_file is None:
+            source_tok_file = conf.source_test_tok
+        if target_raw_file is None:
+            target_raw_file = conf.target_test
 
         #make dataset of source sentence
-        test_source = _file_to_ID_seq(conf.source_test_tok, conf.vocab_source)
+        test_source = make_dataset_from_tok_file(source_tok_file,
+                                                 conf.vocab_source,
+                                                 self.graph)
         
         #translate
         if beam_width == 1:
@@ -414,7 +476,7 @@ class Inference:
         translations = conf.detokenize_target(translation)
 
         #load reference
-        with codecs.open(conf.target_test, 'r', 'utf-8') as _ref_file:
+        with codecs.open(target_raw_file, 'r', 'utf-8') as _ref_file:
             references = [line.rstrip() for line in _ref_file]
 
         #tokenize source and reference for BLEU
@@ -422,6 +484,7 @@ class Inference:
         references_tok = conf.bleu_tokenize_target(references)
 
         #calc BLEU
+        references_tok = [[sent] for sent in references_tok]
         score = corpus_bleu(references_tok, translations_tok)
 
         return score
