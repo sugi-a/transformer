@@ -130,15 +130,15 @@ def multihead_attention(dictionary,  # [N, Td, E]
         n_queries = tf.shape(queries)[1] #max num of tokens in a sentence in the batch
         batch_size = tf.shape(queries)[0]
 
-        # relu projection to make Query, Key, Value matrices.
-        Q = tf.layers.dense(queries, n_units, activation=tf.nn.relu, name='Q')  # [N, Tq, n_units]
-        K = tf.layers.dense(dictionary, n_units, activation=tf.nn.relu, name='K')  # [N, Td, n_units]
-        V = tf.layers.dense(dictionary, n_units, activation=tf.nn.relu, name='V')  # [N, Td, n_units]
+#        # relu projection to make Query, Key, Value matrices.
+#        Q = tf.layers.dense(queries, n_units, activation=tf.nn.relu, name='Q')  # [N, Tq, n_units]
+#        K = tf.layers.dense(dictionary, n_units, activation=tf.nn.relu, name='K')  # [N, Td, n_units]
+#        V = tf.layers.dense(dictionary, n_units, activation=tf.nn.relu, name='V')  # [N, Td, n_units]
 
         # linear projection to make multihead
-        Q_MH = tf.layers.dense(Q, n_units, name='WQ')  # [N, Tq, n_units]
-        K_MH = tf.layers.dense(K, n_units, name='WK')  # [N, Td, n_units]
-        V_MH = tf.layers.dense(V, n_units, name='WV')  # [N, Td, n_units]
+        Q_MH = tf.layers.dense(queries, n_units, use_bias=False, name='WQ')  # [N, Tq, n_units]
+        K_MH = tf.layers.dense(dictionary, n_units, use_bias=False, name='WK')  # [N, Td, n_units]
+        V_MH = tf.layers.dense(dictionary, n_units, use_bias=False, name='WV')  # [N, Td, n_units]
 
         # split the last dimension into multiple heads
         Q_MH = tf.concat(tf.split(Q_MH, n_heads, axis=2), axis=0)  # [N*h, Tq, n_units/h]
@@ -338,7 +338,7 @@ class Decoder(object):
 
             # Final linear projection
             with tf.variable_scope("final_leaner_projection"):
-                self.logits = tf.layers.dense(self.outputs, hparams.vocab_size, name='logits')
+                self.logits = tf.layers.dense(self.outputs, hparams.vocab_size, use_bias=False, name='logits')
                 self.outputs = self.logits
                 self.softmax_outputs = tf.nn.softmax(self.logits)
 
