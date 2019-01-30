@@ -24,6 +24,9 @@ class Hyperparams:
     vocab_size = 16000
     positional_embedding = False
 
+    #beam search
+    length_penalty_a = 1
+
 class Config:
     #sentencepiece setting for this model
     _SP_model_dir = '/disk/sugi/dataset/ASPEC/sp16000'

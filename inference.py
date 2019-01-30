@@ -388,7 +388,11 @@ class Inference:
                             list(beam_has_EOS[beam_has_EOS]) + list(extended_has_EOS))
 
                         #take n best
-                        nbest_args = np.argsort(beam_scores, axis=0)[::-1][:n]
+                        length_penalty = np.power(
+                            (5 + np.array([len(seq) for seq in beam_cands]))/ (5 + 1),
+                            model_config.Hyperparams.length_penalty_a)
+                        score_with_penalty = beam_scores / length_penalty
+                        nbest_args = np.argsort(score_with_penalty, axis=0)[::-1][:n]
                         beam_cands = beam_cands[nbest_args]
                         beam_scores = beam_scores[nbest_args]
                         beam_has_EOS = beam_has_EOS[nbest_args]
