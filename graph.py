@@ -130,64 +130,68 @@ def multihead_attention(dictionary,  # [N, Td, E]
         n_queries = tf.shape(queries)[1] #max num of tokens in a sentence in the batch
         batch_size = tf.shape(queries)[0]
 
-#        # relu projection to make Query, Key, Value matrices.
-#        Q = tf.layers.dense(queries, n_units, activation=tf.nn.relu, name='Q')  # [N, Tq, n_units]
-#        K = tf.layers.dense(dictionary, n_units, activation=tf.nn.relu, name='K')  # [N, Td, n_units]
-#        V = tf.layers.dense(dictionary, n_units, activation=tf.nn.relu, name='V')  # [N, Td, n_units]
-
         # linear projection to make multihead
-        Q_MH = tf.layers.dense(queries, n_units, use_bias=True, name='WQ')  # [N, Tq, n_units]
-        K_MH = tf.layers.dense(dictionary, n_units, use_bias=True, name='WK')  # [N, Td, n_units]
-        V_MH = tf.layers.dense(dictionary, n_units, use_bias=True, name='WV')  # [N, Td, n_units]
+        Q_MH = tf.layers.dense(queries, n_units, use_bias=False, name='WQ')  # [N, Tq, n_units]
+        K_MH = tf.layers.dense(dictionary, n_units, use_bias=False, name='WK')  # [N, Td, n_units]
+        V_MH = tf.layers.dense(dictionary, n_units, use_bias=False, name='WV')  # [N, Td, n_units]
 
         # split the last dimension into multiple heads
-        Q_MH = tf.concat(tf.split(Q_MH, n_heads, axis=2), axis=0)  # [N*h, Tq, n_units/h]
-        K_MH = tf.concat(tf.split(K_MH, n_heads, axis=2), axis=0)  # [N*h, Td, n_units/h]
-        V_MH = tf.concat(tf.split(V_MH, n_heads, axis=2), axis=0)  # [N*h, Td, n_units/h]
+        Q_MH = tf.stack(tf.split(Q_MH, n_heads, axis=2), axis=0)  # [h, N, Tq, head_size]
+        K_MH = tf.stack(tf.split(K_MH, n_heads, axis=2), axis=0)  # [h, N, Tq, head_size]
+        V_MH = tf.stack(tf.split(V_MH, n_heads, axis=2), axis=0)  # [h, N, Tq, head_size]
 
         # query-key multiplication
-        weight = tf.matmul(Q_MH, K_MH, transpose_b=True)  # [N*h, Tq, Td]
+        weight = tf.matmul(Q_MH, K_MH, transpose_b=True)  # [h, N, Tq, Td]
 
         # scaling
         weight = weight / (head_size ** 0.5)
 
         # dictionary padding masking
         with tf.name_scope('dictionary_masking'):
-            padding = tf.fill(tf.shape(weight), -np.inf) #[N*h, Tq, Td]
-            mask = tf.tile(
-                tf.expand_dims(dictionary_mask, axis=1), #[N, 1, Td]
-                [n_heads, n_queries, 1]
-            ) #[N, Tq, Td]
-            weight = tf.where(mask, weight, padding)
+            mask_shape = tf.shape(dictionary_mask)
+            bias = tf.expand_dims(
+                tf.expand_dims(
+                    tf.where(dictionary_mask, tf.fill(mask_shape, 0.0), tf.fill(mask_shape, -np.inf)),
+                    axis=1), #[N, 1, Td]
+                axis=0) #[1, N, 1, Td]
+            weight += bias
 
         # Causality masking (in this case Tq = Td : decoder self-attention)
         if causality:
             with tf.name_scope('causality_masking'):
-                c_mask = tf.equal(tf.matrix_band_part(tf.ones_like(weight[0]), -1, 0), 1) #[Tq, Td] (Tq == Td)
-                c_mask = tf.tile(tf.expand_dims(c_mask, 0), [batch_size * n_heads, 1, 1]) #[N*h, Tq, Td]
-                c_padding = tf.fill(tf.shape(weight), -np.inf)
-                weight = tf.where(c_mask, weight, c_padding)
+                mask_shape = tf.shape(weight[0][0])
+                mask = tf.cast(tf.matrix_band_part(tf.ones(mask_shape, tf.float32), -1, 0), tf.bool)
+                bias = tf.expand_dims(
+                    tf.expand_dims(
+                        tf.where(mask, tf.fill(mask_shape, 0.0), tf.fill(mask_shape, -np.inf)),
+                        axis=0
+                    ), #[1,Tq,Tq]
+                    axis=0
+                ) #[1, 1, Tq, Tq]
+                weight += bias
 
-        weight = tf.nn.softmax(weight)  # [N*h, Tq, Td]
+        # softmax
+        weight = tf.nn.softmax(weight)  # [h, N, Tq, Td]
+
+        # attention dropout
+        weight = tf.layers.dropout(weight, dropout_rate, training=is_training)
 
         # weighted sum
-        outputs = tf.matmul(weight, V_MH, name='weighted_sum')  # [N*h, Tq, n_units/h]
+        outputs = tf.matmul(weight, V_MH, name='weighted_sum')  # [h, N, Tq, head_size]
 
         # restore shape
         with tf.name_scope('concatenate_heads'):
-            outputs = tf.concat(tf.split(outputs, n_heads, axis=0), axis=2)  # [N, Tq, n_units]
+            outputs = tf.squeeze(
+                tf.concat(
+                    tf.split(outputs, n_heads, axis=0), #list of [1, N, Tq, head_size]
+                    axis=3), #[1, N, Tq, n_units]
+                axis=[0])  # [N, Tq, n_units]
 
         # linear projection
-        outputs = tf.layers.dense(outputs, queries.shape[2], use_bias=True, name='attention_output')  # [N, Tq, E]
+        outputs = tf.layers.dense(outputs, queries.shape[2], use_bias=False, name='attention_output')  # [N, Tq, E]
 
         # dropout
-        outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
-
-        # Residual connection
-        outputs += queries
-
-        # layer normalization
-        outputs = layer_norm(outputs)
+        outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=is_training)
 
         return outputs
 
@@ -200,9 +204,6 @@ def feedforward(input, n_units=1024, scope="feedforward", dropout_rate=0.1, reus
         outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
         #linear
         outputs = tf.layers.dense(outputs, input.get_shape().as_list()[-1], use_bias=True)
-
-        outputs += input
-        outputs = layer_norm(outputs)
 
         return outputs
 
@@ -250,22 +251,25 @@ class Encoder(object):
             for i in range(hparams.n_blocks):
                 with tf.variable_scope("num_blocks_{}".format(i)):
                     # Multihead Attention
-                    self.outputs = multihead_attention(dictionary=self.outputs,  # [N, Td, E]
+                    outputs_norm = layer_norm(self.outputs, scope="mult_attn_norm")
+                    self.outputs = multihead_attention(dictionary=outputs_norm,  # [N, Td, E]
                                                    dictionary_mask=self.enc_mask,  # [N, Td]
-                                                   queries=self.outputs,  # [N, Tq, E]
+                                                   queries=outputs_norm,  # [N, Tq, E]
                                                    n_units=hparams.attention_size,
                                                    n_heads=hparams.n_heads,
                                                    causality=False,
                                                    scope="multihead_attention",
                                                    reuse=None,
                                                    dropout_rate=hparams.dropout_rate,
-                                                   is_training=is_training)
+                                                   is_training=is_training) + self.outputs
 
                     # Feed Forward
-                    self.outputs = feedforward(self.outputs,
+                    outputs_norm = layer_norm(self.outputs, scope="ffn_norm")
+                    self.outputs = feedforward(outputs_norm,
                                                n_units=4*hparams.embed_size,
                                                dropout_rate=hparams.dropout_rate,
-                                               is_training=is_training)
+                                               is_training=is_training) + self.outputs
+            self.outputs = layer_norm(self.outputs, scope="output_norm")
             self.hidden_states = self.outputs
 
 class Decoder(object):
@@ -310,37 +314,41 @@ class Decoder(object):
             for i in range(hparams.n_blocks):
                 with tf.variable_scope("num_blocks_{}".format(i)):
                     ## Multihead Attention ( self-attention)
-                    self.outputs = multihead_attention(dictionary=self.outputs,
+                    outputs_norm = layer_norm(self.outputs, scope="self_attn_norm")
+                    self.outputs = multihead_attention(dictionary=outputs_norm,
                                                     dictionary_mask=self.dec_mask,
-                                                    queries=self.outputs,
+                                                    queries=outputs_norm,
                                                     n_units=hparams.attention_size,
                                                     n_heads=hparams.n_heads,
                                                     causality=True,
                                                     scope="dec_self_attention",
                                                     reuse=None,
                                                     dropout_rate=hparams.dropout_rate,
-                                                    is_training=is_training)
+                                                    is_training=is_training) + self.outputs
                     
                     ## Multihead Attention ( vanilla attention)
+                    outputs_norm = layer_norm(self.outputs, scope="context_attn_norm")
                     self.outputs= multihead_attention(dictionary=enc_hidden_states,
                                                     dictionary_mask=enc_mask,
-                                                    queries=self.outputs,
+                                                    queries=outputs_norm,
                                                     n_units=hparams.attention_size,
                                                     n_heads=hparams.n_heads,
                                                     causality=False,
                                                     scope="dec_vanilla_attention",
                                                     reuse=None,
                                                     dropout_rate=hparams.dropout_rate,
-                                                    is_training=is_training)
+                                                    is_training=is_training) + self.outputs
 
                     ## Feed Forward
-                    self.outputs = feedforward(self.outputs,
+                    outputs_norm = layer_norm(self.outputs, scope="ffn_norm")
+                    self.outputs = feedforward(outputs_norm,
                                                n_units=4*hparams.embed_size,
                                                dropout_rate=hparams.dropout_rate,
-                                               is_training=is_training)
+                                               is_training=is_training) + self.outputs
 
             # Final linear projection
-            with tf.variable_scope("final_leaner_projection"):
+            with tf.variable_scope("leaner_projection"):
+                self.outputs = layer_norm(self.outputs, scope="output_norm")
                 self.logits = tf.layers.dense(self.outputs, hparams.vocab_size, use_bias=True, name='logits')
                 self.outputs = self.logits
                 self.softmax_outputs = tf.nn.softmax(self.logits)
