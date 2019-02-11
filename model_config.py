@@ -1,3 +1,5 @@
+#learning rate 0.0001
+
 import os
 import subprocess
 
@@ -97,7 +99,7 @@ class Config:
 
     #sentencepiece setting for this model
     #make sure the vocabulary size is consistent with Hyperparams.vocab_size
-    _SP_model_dir = '/disk/sugi/dataset/ASPEC/preprocessed/sp16k_t1_shared'
+    _SP_model_dir = '/disk/sugi/dataset/ASPEC/preprocessed2/sp16k_t1600k_shared'
     _SP_model_prefix_source = _SP_model_dir + '/sp16k'
     _SP_model_prefix_target = _SP_model_prefix_source #vocabulary is shared
     _SP_model_file_source = _SP_model_prefix_source + ".model"
@@ -119,16 +121,16 @@ class Config:
     UNK_ID = 3
 
     #Preprocessed dataset
-    source_train = '/disk/sugi/dataset/ASPEC/preprocessed/train/train-1.en.txt'
-    target_train = '/disk/sugi/dataset/ASPEC/preprocessed/train/train-1.ja.txt'
-    source_dev = '/disk/sugi/dataset/ASPEC/preprocessed/dev/dev.en.txt' 
-    target_dev = '/disk/sugi/dataset/ASPEC/preprocessed/dev/dev.ja.txt' 
-    source_test = '/disk/sugi/dataset/ASPEC/preprocessed/test/test.en.txt' 
-    target_test = '/disk/sugi/dataset/ASPEC/preprocessed/test/test.ja.txt' 
+    source_train = '/disk/sugi/dataset/ASPEC/preprocessed2/train/train-1500k.en.txt'
+    target_train = '/disk/sugi/dataset/ASPEC/preprocessed2/train/train-1500k.ja.txt'
+    source_dev = '/disk/sugi/dataset/ASPEC/preprocessed2/dev/dev.en.txt' 
+    target_dev = '/disk/sugi/dataset/ASPEC/preprocessed2/dev/dev.ja.txt' 
+    source_test = '/disk/sugi/dataset/ASPEC/preprocessed2/test/test.en.txt' 
+    target_test = '/disk/sugi/dataset/ASPEC/preprocessed2/test/test.ja.txt' 
 
     # tokenized dataset
-    source_train_tok = _SP_model_dir + '/train/train-1.en.tok'
-    target_train_tok = _SP_model_dir + '/train/train-1.ja.tok'
+    source_train_tok = _SP_model_dir + '/train/train-1500k.en.tok'
+    target_train_tok = _SP_model_dir + '/train/train-1500k.ja.tok'
     source_dev_tok = _SP_model_dir + '/dev/dev.en.tok'
     target_dev_tok = _SP_model_dir + '/dev/dev.ja.tok'
     source_test_tok = _SP_model_dir + '/test/test.en.tok'
@@ -160,7 +162,7 @@ class Config:
 
         t = "en" if type=="source" else "ja"
         output_text = subprocess.check_output(
-            ["/disk/sugi/dataset/ASPEC/preprocess.sh", t],
+            ["/disk/sugi/dataset/ASPEC/preprocess2.sh", t],
             input=input_text.encode()).decode()
             
         if out_file is not None:
@@ -238,9 +240,11 @@ class Config:
         Returns:
             list of list of str."""
             
-        #in this model_config.py target=ja AND the preprocessed text is already tokenized by kytea. so just split the text by space is enough.
-        return [line.split() for line in texts]
             
+        kytea_input = ("\n".join(texts) + "\n").encode()
+        kytea_output = subprocess.check_output(["kytea", "-out", "tok"],
+                                               input=kytea_input).decode()
+        return [line.strip().split() for line in kytea_output.strip().split("\n")]
 
 
 # preprocessing: Train sentencepiece with vocabulary size 32k shared by source/target
@@ -248,7 +252,7 @@ if __name__ == '__main__':
     #Preprocessing
     if not os.path.exists(Config.source_train):
         print("preprocessing the corpus")
-        subprocess.run(["/disk/sugi/dataset/ASPEC/preprocess.sh", "init"])
+        subprocess.run(["/disk/sugi/dataset/ASPEC/preprocess2.sh", "init"])
 
     if not os.path.exists(Config.source_train_tok):
         #train sentencepiece with the preprocessed train data
