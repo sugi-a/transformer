@@ -60,7 +60,9 @@ train_source = _file_to_ID_seq(model_config.Config.source_train_tok,
 train_target = _file_to_ID_seq(model_config.Config.target_train_tok,
                                model_config.Config.vocab_target)
 train_data = tf.data.Dataset.zip((train_source, train_target))\
-    .shuffle(buffer_size=100000)\
+    .filter(lambda train,dev: tf.logical_and(tf.greater(hp.maxlen, train[1]),
+                                     tf.greater(hp.maxlen, dev[1])))\
+    .shuffle(buffer_size=200000)\
     .padded_batch(model_config.Hyperparams.batch_size,
                   (([None], []), ([None], [])),
                   ((conf.PAD_ID, 0), (conf.PAD_ID, 0)))\
@@ -99,7 +101,6 @@ decoder = Decoder(dec_inputs, y_lengths,  encoder.outputs, encoder.enc_mask, hp,
 #mask on output sequence
 is_target = decoder.dec_mask
 zero_pad = tf.zeros_like(is_target, dtype=tf.float32)
-is_target_int = tf.cast(tf.not_equal(y, 0), dtype=tf.float32) # 1 for target positions and 0 for paddings
 
 #number of tokens in the batch
 n_batch_tokens = tf.cast(tf.reduce_sum(decoder.lengths), dtype=tf.float32) 
@@ -122,7 +123,7 @@ batch_loss = tf.reduce_sum(tf.where(is_target, loss, zero_pad))
 mean_loss = batch_loss / n_batch_tokens
 
 # optimizer
-optimizer = tf.train.AdamOptimizer(learning_rate=hp.lr, beta1=0.9, beta2=0.98, epsilon=1e-8)
+optimizer = tf.train.AdamOptimizer(learning_rate=hp.lr)
 global_step_var = tf.Variable(0, trainable=False, name="global_step", dtype=tf.int32)
 train_op = optimizer.minimize(mean_loss, global_step_var)
 
@@ -141,7 +142,7 @@ train_summary_op = tf.summary.merge([
     tf.summary.scalar('accuracy', acc),
     tf.summary.scalar('mean_loss', mean_loss)
     ])
-summary_writer = tf.summary.FileWriter(summary_dir)
+summary_writer = tf.summary.FileWriter(summary_dir, tf.get_default_graph())
 
 #Inferencer
 inferencer = inference.Inference()
@@ -155,10 +156,11 @@ tf.get_default_graph().finalize()
 
 #session config
 config = tf.ConfigProto()
-config.gpu_options.allow_growth = True
+#config.gpu_options.allow_growth = True
 #config.log_device_placement = True
 
 with tf.Session(config=config) as sess:
+#    sess = tf_debug.LocalCLIDebugWrapperSession(sess)
     print("session start")
     # restore or initialize variables
     sess.run(global_step_var.initializer)
@@ -246,7 +248,7 @@ with tf.Session(config=config) as sess:
         #training loop for one epoch
         while True:
             try:
-                if(global_step % 100 == 0):
+                if(global_step % 500 == 0):
                     # train and get summary on training data
                     train_summary, global_step, _ = sess.run(
                         [train_summary_op, global_step_var, train_op],

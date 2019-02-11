@@ -10,3 +10,6 @@
  - try sp32000
     - done
  - added global step variable
+ 
+ - When doing evaluation, reference should be the text at the phase right before final tokenization
+    ex. if the preprocessing is 'moses tokenization' -> Trucaser -> 'sentencepiece tokenization' reference texts should be the one after Trucasing.

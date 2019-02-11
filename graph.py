@@ -59,8 +59,8 @@ def embedding(input,
         lookup_table = tf.get_variable("lookup_table", (vocab_size, embed_size),
                                        initializer=tf.contrib.layers.xavier_initializer(),
                                        dtype=tf.float32)
-        if zero_pad:
-            lookup_table = tf.concat((tf.zeros((1, embed_size)), lookup_table[1:]), axis=0)
+#        if zero_pad:
+#            lookup_table = tf.concat((tf.zeros((1, embed_size)), lookup_table[1:]), axis=0)
 
         outputs = tf.nn.embedding_lookup(lookup_table, input)
 
@@ -136,9 +136,9 @@ def multihead_attention(dictionary,  # [N, Td, E]
 #        V = tf.layers.dense(dictionary, n_units, activation=tf.nn.relu, name='V')  # [N, Td, n_units]
 
         # linear projection to make multihead
-        Q_MH = tf.layers.dense(queries, n_units, use_bias=False, name='WQ')  # [N, Tq, n_units]
-        K_MH = tf.layers.dense(dictionary, n_units, use_bias=False, name='WK')  # [N, Td, n_units]
-        V_MH = tf.layers.dense(dictionary, n_units, use_bias=False, name='WV')  # [N, Td, n_units]
+        Q_MH = tf.layers.dense(queries, n_units, use_bias=True, name='WQ')  # [N, Tq, n_units]
+        K_MH = tf.layers.dense(dictionary, n_units, use_bias=True, name='WK')  # [N, Td, n_units]
+        V_MH = tf.layers.dense(dictionary, n_units, use_bias=True, name='WV')  # [N, Td, n_units]
 
         # split the last dimension into multiple heads
         Q_MH = tf.concat(tf.split(Q_MH, n_heads, axis=2), axis=0)  # [N*h, Tq, n_units/h]
@@ -178,7 +178,7 @@ def multihead_attention(dictionary,  # [N, Td, E]
             outputs = tf.concat(tf.split(outputs, n_heads, axis=0), axis=2)  # [N, Tq, n_units]
 
         # linear projection
-        outputs = tf.layers.dense(outputs, queries.shape[2], use_bias=False, name='attention_output')  # [N, Tq, E]
+        outputs = tf.layers.dense(outputs, queries.shape[2], use_bias=True, name='attention_output')  # [N, Tq, E]
 
         # dropout
         outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
@@ -194,10 +194,13 @@ def multihead_attention(dictionary,  # [N, Td, E]
 
 def feedforward(input, n_units=1024, scope="feedforward", dropout_rate=0.1, reuse=None, is_training=True):
     with tf.variable_scope(scope, reuse=reuse):
+        #relu
         outputs = tf.layers.dense(input, n_units, activation=tf.nn.relu, use_bias=True)
-        outputs = tf.layers.dense(outputs, input.get_shape().as_list()[-1], activation=tf.nn.relu, use_bias=True)
-
+        #dropout
         outputs = tf.layers.dropout(outputs, rate=dropout_rate, training=tf.convert_to_tensor(is_training))
+        #linear
+        outputs = tf.layers.dense(outputs, input.get_shape().as_list()[-1], use_bias=True)
+
         outputs += input
         outputs = layer_norm(outputs)
 
@@ -338,7 +341,7 @@ class Decoder(object):
 
             # Final linear projection
             with tf.variable_scope("final_leaner_projection"):
-                self.logits = tf.layers.dense(self.outputs, hparams.vocab_size, use_bias=False, name='logits')
+                self.logits = tf.layers.dense(self.outputs, hparams.vocab_size, use_bias=True, name='logits')
                 self.outputs = self.logits
                 self.softmax_outputs = tf.nn.softmax(self.logits)
 

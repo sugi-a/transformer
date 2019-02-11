@@ -52,12 +52,12 @@ def make_dataset_from_tok_file(tok_data_file, vocab_file_name, graph=None):
                 [seq, tf.ones([1], tf.int32)*model_config.Config.EOS_ID], axis=0))\
             .map(lambda seq: (seq, tf.shape(seq)[0]))
 
-def make_dataset_from_texts(texts, vocab_file_name, graph=None):
+def make_dataset_from_texts(texts, data_type, graph=None):
     """make a dataset input to the encoder
     
     Args:
         texts: list of str. texts must not contain \n
-        vocab_file_name: name of the vocabulary file
+        data_type: "source" or "target"
         graph: graph in which the dataset is made
     Returns:
         dataset: tuple of ID sequence and its length. EOS is added to the seq.
@@ -67,7 +67,7 @@ def make_dataset_from_texts(texts, vocab_file_name, graph=None):
         graph = tf.get_default_graph()
 
     texts = [line.strip() for line in texts]
-    seqs = conf.tokenize_source(texts)
+    seqs = conf.text2IDs(texts, data_type)
 
     with graph.as_default():
         return tf.data.Dataset.from_generator(lambda:seqs,
@@ -261,7 +261,9 @@ class Inference:
 
                         position = position + 1
 
-                    ret_cands.extend(list(beam_cands))
+                    beam_cands_l = [cand[:np.argwhere(cand==conf.EOS_ID)[0][0]]
+                        for cand in beam_cands]
+                    ret_cands.extend(beam_cands_l)
             print("translation done.")
             return ret_cands
 
@@ -401,45 +403,64 @@ class Inference:
                         if np.all(beam_has_EOS):
                             break
                         elif position > len(enc_hidden_states[0]) * 2:
-                            for seq in beam_cands[np.logical_not(beam_has_EOS)]:
-                                seq[position] = conf.EOS_ID
+                            for i, has_EOS in enumerate(beam_has_EOS):
+                                if not has_EOS:
+                                    beam_cands[i][position] = conf.EOS_ID
                             beam_scores[np.logical_not(beam_has_EOS)] = -np.inf
                             beam_has_EOS[np.logical_not(beam_has_EOS)] = True
                             break
 
                         position = position + 1
 
-                    ret_cands.append(list(beam_cands))
+                    beam_cands_l = [cand[:np.argwhere(cand==conf.EOS_ID)[0][0]]
+                        for cand in beam_cands]
+                    ret_cands.append(beam_cands_l)
                     ret_scores.append(list(beam_scores))
             print("translation done.")
             return (ret_cands, ret_scores)
 
-    def translate_sentences(self, sentences, beam_width=1, checkpoint=None):
+    def translate_sentences(self, sentences, beam_width=1, checkpoint=None, raw=False, return_beam_detail=False):
         """translate sentences
         
         Args:
             sentences: list of str. white spaces at the end of sentences will be
                 removed before translation.
+            beam_width: beam width
+            checkpoint: checkpoint of the model
+            raw: Boolean. if True the sentences are regarded as raw texts (not tokenized)
+            return_beam_detail: Boolean. if True this method additionally returns the beam candidates and scores as the 2nd and 3rd element of the returned tuple.
         
         Returns:
             translations. list of str"""
 
+        if raw:
+            sentences = [" ".join(tok_seq)
+                for tok_seq in  conf.text2tokens(sentences, "source")]
+
         #make sure sentences don't have \n at the ends
         sentences = [sent.strip() for sent in sentences]
 
-        dataset = make_dataset_from_texts(sentences, conf.vocab_source, self.graph)
+        dataset = make_dataset_from_texts(sentences, "source", self.graph)
 
-        if beam_width == 1:
+        if beam_width == 1 and not return_beam_detail:
             translations = self.get_1_best_for_dataset(dataset, checkpoint=checkpoint)
         else:
-            translations, _ = self.get_n_best_for_dataset(dataset, beam_width, checkpoint=checkpoint)
-            translations = [cands[0] for cands in translations]
+            translations_cands, scores = self.get_n_best_for_dataset(dataset,
+                                                                     beam_width,
+                                                                     checkpoint=checkpoint)
+            translations = [cands[0] for cands in translations_cands]
 
         #detokenize
         translations = [seq.tolist() for seq in translations]
-        translations = conf.detokenize_target(translations)
+        translations = conf.IDs2text(translations, "target")
 
-        return translations
+        if return_beam_detail:
+            #detokenize candidates
+            translations_cands = [conf.IDs2text([IDs.tolist() for IDs in cands], "target")
+                                    for cands in translations_cands]
+            return translations, translations_cands, scores
+        else:
+            return translations
 
     def translate_file(self, file_name, beam_width=1, checkpoint=None):
         """translate sentences in a file.
@@ -451,15 +472,16 @@ class Inference:
            return self.translate_sentences(f.readlines(), beam_width, checkpoint)
 
     def BLEU_evaluation_with_test_data(self, beam_width=1, checkpoint=None,
-                                       source_tok_file=None, target_raw_file=None):
+                                       source_tok_file=None, target_tok_file=None,
+                                       return_samples=False):
         """Perform evaluation with BLEU metric using the test data"""
 
         #source and target files. source file must be tokenized
-        assert (source_tok_file is None) == (target_raw_file is None)
+        assert (source_tok_file is None) == (target_tok_file is None)
         if source_tok_file is None:
             source_tok_file = conf.source_test_tok
-        if target_raw_file is None:
-            target_raw_file = conf.target_test
+        if target_tok_file is None:
+            target_tok_file = conf.target_test_tok
 
         #make dataset of source sentence
         test_source = make_dataset_from_tok_file(source_tok_file,
@@ -475,21 +497,26 @@ class Inference:
                                                                checkpoint=checkpoint)
             translation = [cands[0] for cands in translation]
         
-        #detokenize
-        translation = [seq.tolist() for seq in translation]
-        translations = conf.detokenize_target(translation)
+        #load reference file which is tokenized.
+        with codecs.open(target_tok_file, 'r', 'utf-8') as _ref_file:
+            references = [line.rstrip().split() for line in _ref_file]
 
-        #load reference
-        with codecs.open(target_raw_file, 'r', 'utf-8') as _ref_file:
-            references = [line.rstrip() for line in _ref_file]
+        #detokenize translation
+        translation = [seq.tolist() for seq in translation]
+        translations = conf.IDs2text(translation, "target")
+        #detokenize reference
+        references = conf.tokens2text(references, "target")
 
         #tokenize source and reference for BLEU
-        translations_tok = conf.bleu_tokenize_target(translations)
-        references_tok = conf.bleu_tokenize_target(references)
+        translations_tok = conf.text2tokens_BLEU(translations)
+        references_tok = conf.text2tokens_BLEU(references)
 
         #calc BLEU
         references_tok = [[sent] for sent in references_tok]
         score = corpus_bleu(references_tok, translations_tok)
 
-        return score
+        if return_samples:
+            return score, translations_tok, references_tok
+        else:
+            return score
 
