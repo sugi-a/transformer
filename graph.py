@@ -35,6 +35,26 @@ def layer_norm(input, eps=1e-8, scope="layer_norm", reuse=None):
         return gamma * normalized + beta
 
 
+def embedding_layer(inputs, weight_matrix, scope="embedding", scale=True):
+    """Embeds a given tensor
+
+    Args:
+        inputs: A Tensor with the shape [batch_size, sentence_len]
+            with type int32 or int64 representing the ids
+        scale: A boolean. If True, the outputs is multiplied by sqrt embed_size.
+        scope: variable_scope
+        weight_matrix: [vocab_size, emb_size]
+
+    Returns:
+        A 3D Tensor. [batch_size, sentence_len, embed_size]
+    """
+    emb_size = weight_matrix.get_shape().as_list()[1]
+    outputs = tf.gather(weight_matrix, inputs)
+    if scale:
+        outputs = outputs * (emb_size ** 0.5)
+    return outputs
+
+
 def embedding(input,
               vocab_size,
               embed_size,
@@ -217,18 +237,18 @@ class Encoder(object):
     def __init__(self, inputs, lengths, hparams, is_training):
         super(Encoder, self).__init__()
 
-        self.inputs = inputs
-        self.lengths = lengths
-        self.enc_mask = tf.sequence_mask(lengths, tf.shape(inputs)[1])
-        
         with tf.variable_scope("encoder"):
+            self.inputs = inputs
+            self.lengths = lengths
+            self.enc_mask = tf.sequence_mask(lengths, tf.shape(inputs)[1])
+            
             # Embedding
-            self.outputs = embedding(self.inputs,
-                                 vocab_size=hparams.vocab_size,
-                                 embed_size=hparams.embed_size,
-                                 scope="enc_embed",
-                                 scale=True,
-                                 zero_pad=True)
+            self.embedding_weight = tf.get_variable(
+                "embedding_weight",
+                [hparams.vocab_size, hparams.embed_size],
+                tf.float32)
+            self.outputs = embedding_layer(self.inputs, self.embedding_weight)
+
             # Positional Encoding
             if not hparams.positional_embedding:
                 self.outputs = positional_encoding(self.outputs)
@@ -274,21 +294,20 @@ class Encoder(object):
 
 class Decoder(object):
     """docstring for Decoder"""
-    def __init__(self, inputs, lengths, enc_hidden_states, enc_mask, hparams, is_training):
+    def __init__(self, inputs, lengths, enc_hidden_states, enc_mask, hparams, is_training, embedding_weight=None):
         super(Decoder, self).__init__()
         
-        self.inputs = inputs
-        self.lengths = lengths
-        self.dec_mask = tf.sequence_mask(lengths, tf.shape(inputs)[1])
-
         with tf.variable_scope("decoder"):
+            self.inputs = inputs
+            self.lengths = lengths
+            self.dec_mask = tf.sequence_mask(lengths, tf.shape(inputs)[1])
+
             ## Embedding
-            self.outputs = embedding(self.inputs, 
-                                  vocab_size=hparams.vocab_size, 
-                                  embed_size=hparams.embed_size,
-                                  scope="dec_embed",
-                                  scale=True,
-                                  zero_pad=True)
+            if embedding_weight is None:
+                self.embedding_weight = tf.get_variable("embedding_weight", [hparams.vocab_size, hparams.embed_size], tf.float32)
+            else:
+                self.embedding_weight = embedding_weight
+            self.outputs = embedding_layer(self.inputs, self.embedding_weight)
 
             ## Positional Encoding
             if not hparams.positional_embedding:
@@ -349,7 +368,8 @@ class Decoder(object):
             # Final linear projection
             with tf.variable_scope("leaner_projection"):
                 self.outputs = layer_norm(self.outputs, scope="output_norm")
-                self.logits = tf.layers.dense(self.outputs, hparams.vocab_size, use_bias=True, name='logits')
+                # outputs: [batch_size, sentence_len, emb_size]. emb_weight: [vocab_size, emb_size]
+                self.logits = tf.tensordot(self.outputs, self.embedding_weight, [[2], [1]], name="logits")
                 self.outputs = self.logits
                 self.softmax_outputs = tf.nn.softmax(self.logits)
 

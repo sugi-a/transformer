@@ -13,7 +13,7 @@ class Hyperparams:
 
     # training
     batch_size = 128
-    lr = 0.0001
+    warm_up_step = 4000
     n_epochs = 20
 
     # model
@@ -24,6 +24,7 @@ class Hyperparams:
     embed_size = 512
     dropout_rate = 0.1
     vocab_size = 16000
+    share_embedding = True
     positional_embedding = False
 
     #beam search

@@ -143,7 +143,8 @@ class Inference:
                                    _enc_hidden_states,
                                    _enc_mask,
                                    hp,
-                                   False)
+                                   False,
+                                   self.encoder.embedding_weight if hp.share_embedding else None)
 
             #additional operation nodes for prediction
             self.last_pos_logits = self.decoder.logits[:, -1]

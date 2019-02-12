@@ -95,7 +95,13 @@ encoder = Encoder(x, x_lengths,  hp, is_training=True)
 # decoder
 # add <S> (id:2) to the head and remove the last position of y, resulting a tensor with the same as y.
 dec_inputs = tf.concat([tf.ones_like(y[:, :1]) * conf.SOS_ID, y[:,:-1]], axis=-1) 
-decoder = Decoder(dec_inputs, y_lengths,  encoder.outputs, encoder.enc_mask, hp, True)
+decoder = Decoder(dec_inputs,
+                  y_lengths,
+                  encoder.outputs,
+                  encoder.enc_mask,
+                  hp,
+                  True,
+                  encoder.embedding_weight if hp.share_embedding else None)
 
 #------------------ loss and optimizer---------------------
 #mask on output sequence
@@ -123,8 +129,17 @@ batch_loss = tf.reduce_sum(tf.where(is_target, loss, zero_pad))
 mean_loss = batch_loss / n_batch_tokens
 
 # optimizer
-optimizer = tf.train.AdamOptimizer(learning_rate=hp.lr)
-global_step_var = tf.Variable(0, trainable=False, name="global_step", dtype=tf.int32)
+# learning rate controller. argument "step" is a scalar Tensor
+def get_learning_rate(step):
+    WARM_UP_STEP = tf.cast(hp.warm_up_step, tf.float32) 
+    step = tf.cast(step, tf.float32)
+    rate = hp.embed_size ** (-0.5) * tf.minimum(tf.rsqrt(step),
+                                                step * tf.pow(WARM_UP_STEP, -1.5))
+    return rate
+
+global_step_var = tf.train.get_or_create_global_step()
+lr = get_learning_rate(global_step_var)
+optimizer = tf.train.AdamOptimizer(learning_rate=lr)
 train_op = optimizer.minimize(mean_loss, global_step_var)
 
 """ make directories """
@@ -140,7 +155,8 @@ saver = tf.train.Saver(max_to_keep=12)
 # summary
 train_summary_op = tf.summary.merge([
     tf.summary.scalar('accuracy', acc),
-    tf.summary.scalar('mean_loss', mean_loss)
+    tf.summary.scalar('mean_loss', mean_loss),
+    tf.summary.scalar('learning_rate', lr)
     ])
 summary_writer = tf.summary.FileWriter(summary_dir, tf.get_default_graph())
 
@@ -162,13 +178,11 @@ config = tf.ConfigProto()
 with tf.Session(config=config) as sess:
 #    sess = tf_debug.LocalCLIDebugWrapperSession(sess)
     print("session start")
-    # restore or initialize variables
-    sess.run(global_step_var.initializer)
+    # initialize and restore variables
+    sess.run(variable_initializer)
     latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
     if latest_checkpoint is not None:
         saver.restore(sess, latest_checkpoint)
-    else:
-        sess.run(variable_initializer)
 
     #initialize tables
     print("initializing tables")
