@@ -34,46 +34,49 @@ from model_config import Config as conf
 import inference
 
 # load dataset
-def _file_to_ID_seq(filename, vocab_file_name):
+def _create_dataset(source_file_name, target_file_name, source_vocab_file_name, target_vocab_file_name, shuffle_size=None):
     """load file into dataset"""
-    table = tf.contrib.lookup.index_table_from_file(
+    tables = [tf.contrib.lookup.index_table_from_file(
                 vocab_file_name,
                 num_oov_buckets=0,
                 default_value=conf.UNK_ID,
                 key_column_index=0)
+                for vocab_file_name in (source_vocab_file_name, target_vocab_file_name)]
     ncpu = args.n_cpu_cores
-    return tf.data.TextLineDataset(filename)\
-    .map(lambda line: tf.string_split([line]).values, ncpu)\
-    .map(lambda tokens: tf.cast(table.lookup(tokens), tf.int32), ncpu)\
-    .map(lambda seq: tf.concat( #adding EOS ID
-        [seq, tf.ones([1], tf.int32)*model_config.Config.EOS_ID], axis=0), ncpu)\
-    .map(lambda seq: (seq, tf.shape(seq)[0]), ncpu)
-#    return tf.data.TextLineDataset(filename)\
-#    .map(lambda line: tf.string_split([line]).values, ncpu)\
-#    .map(lambda tokens: tf.cast(table.lookup(tokens), tf.int32), ncpu)\
-#    .map(lambda seq: tf.concat( #adding EOS ID
-#        [seq, tf.ones([1], tf.int32)*model_config.Config.EOS_ID], axis=0), ncpu)
+    source_dataset = tf.data.TextLineDataset(source_file_name)
+    target_dataset = tf.data.TextLineDataset(target_file_name)
+    dataset = tf.data.Dataset.zip((source_dataset, target_dataset))
+    if shuffle_size is not None:
+        dataset = dataset.shuffle(shuffle_size)
+    return (dataset
+        .map(lambda s,t: tuple(tf.string_split([line]).values for line in [s,t]), ncpu)
+        .map(lambda s,t: tuple(tf.cast(tables[i].lookup(tokens), tf.int32)
+            for i, tokens in enumerate([s,t])), ncpu)
+        .map(lambda s,t: tuple(tf.pad(seq, [[0, 1]], constant_values=conf.EOS_ID) for seq in [s,t]), ncpu)
+        .map(lambda s,t: tuple((seq, tf.shape(seq)[0]) for seq in [s,t]), ncpu)
+    )
 
 #train dataset
-train_source = _file_to_ID_seq(model_config.Config.source_train_tok,
-                               model_config.Config.vocab_source)
-train_target = _file_to_ID_seq(model_config.Config.target_train_tok,
-                               model_config.Config.vocab_target)
-train_data = tf.data.Dataset.zip((train_source, train_target))\
+train_data = (_create_dataset(
+                conf.source_train_tok,
+                conf.target_train_tok,
+                conf.vocab_source,
+                conf.vocab_target,
+                1000*1000)
     .filter(lambda train,dev: tf.logical_and(tf.greater(hp.maxlen, train[1]),
-                                     tf.greater(hp.maxlen, dev[1])))\
-    .shuffle(buffer_size=200000)\
+                                     tf.greater(hp.maxlen, dev[1])))
     .padded_batch(model_config.Hyperparams.batch_size,
                   (([None], []), ([None], [])),
-                  ((conf.PAD_ID, 0), (conf.PAD_ID, 0)))\
-    .prefetch(1)
+                  ((conf.PAD_ID, 0), (conf.PAD_ID, 0)))
+    .prefetch(3))
 
 #development dataset
-dev_source = _file_to_ID_seq(model_config.Config.source_dev_tok,
-                             model_config.Config.vocab_source)
-dev_target = _file_to_ID_seq(model_config.Config.target_dev_tok,
-                             model_config.Config.vocab_target)
-dev_data = tf.data.Dataset.zip((dev_source, dev_target))\
+dev_data = _create_dataset(
+                conf.source_dev_tok,
+                conf.target_dev_tok,
+                conf.vocab_source,
+                conf.vocab_target
+            )\
     .padded_batch(model_config.Hyperparams.batch_size,
                   (([None], []), ([None], [])),
                   ((conf.PAD_ID, 0), (conf.PAD_ID, 0)))\
