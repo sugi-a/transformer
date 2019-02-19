@@ -21,7 +21,7 @@ n_cpu_cores:
 parser = argparse.ArgumentParser()
 parser.add_argument('--model_dir', required=True,
     help="Path of the directory which has model_config.py (required)")
-parser.add_argument('--n_cpu_cores', default=4, type=int,
+parser.add_argument('--n_cpu_cores', default=8, type=int,
     help="Number of CPU cores this script can use when preprocessing dataset")
 args = parser.parse_args()
 
@@ -68,7 +68,7 @@ train_data = (_create_dataset(
     .padded_batch(model_config.Hyperparams.batch_size,
                   (([None], []), ([None], [])),
                   ((conf.PAD_ID, 0), (conf.PAD_ID, 0)))
-    .prefetch(3))
+    .prefetch(4))
 
 #development dataset
 dev_data = _create_dataset(
