@@ -177,7 +177,7 @@ def train():
                     conf.target_train_tok,
                     conf.vocab_source,
                     conf.vocab_target,
-                    1000*1000)
+                    2000*1000)
         .filter(lambda x,y: tf.logical_and(tf.greater(hp.maxlen, x[1]),
                                          tf.greater(hp.maxlen, y[1])))
         .padded_batch(model_config.Hyperparams.batch_size // args.n_gpus,
@@ -327,7 +327,7 @@ def train():
                 max_bleu = bleu
             else:
                 no_improve_count += 1
-                if no_improve_count >= 5:
+                if no_improve_count >= 4:
                     break
 
             # training
