@@ -10,8 +10,6 @@ import time
 from tensorflow.python import debug as tf_debug
 from graph import *
 
-if __name__ != '__main__':
-    sys.exit()
 
 """
 arguments of this script

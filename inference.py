@@ -463,14 +463,14 @@ class Inference:
         else:
             return translations
 
-    def translate_file(self, file_name, beam_width=1, checkpoint=None):
+    def translate_file(self, file_name, beam_width=1, checkpoint=None, raw=False, return_beam_detail=False):
         """translate sentences in a file.
         sentence must not be tokenized. This method makes Dataset AFTER tokenizing the sentences (tokenization is not included in the Dataset pipeline)
         
         Returns:
             list of str"""
         with codecs.open(file_name, "r", "utf-8") as f:
-           return self.translate_sentences(f.readlines(), beam_width, checkpoint)
+           return self.translate_sentences(f.readlines(), beam_width, checkpoint, raw, return_beam_detail)
 
     def BLEU_evaluation_with_test_data(self, beam_width=1, checkpoint=None,
                                        source_tok_file=None, target_tok_file=None,
