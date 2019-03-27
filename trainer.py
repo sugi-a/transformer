@@ -215,7 +215,7 @@ def train():
             # BLEU evaluation
             logger.info('Computing BLEU score')
             score = inference.BLEU_evaluation(Config.source_dev_tok,
-                                              Config.target_dev_tok),
+                                              Config.target_dev_tok,
                                               beam_size=1,
                                               session=sess,
                                               result_file_prefix=dev_bleu_dir+'/step_{}'.format(global_step))
