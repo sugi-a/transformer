@@ -1,7 +1,9 @@
-#learning rate 0.0001
+# Templete of model_config.py
 
 import os
 import subprocess
+from logging import getLogger, DEBUG, basicConfig
+logger = getLogger(__name__)
 
 import numpy as np
 import tensorflow as tf
@@ -100,19 +102,11 @@ class Config:
 
     #sentencepiece setting for this model
     #make sure the vocabulary size is consistent with Hyperparams.vocab_size
-    _SP_model_dir = '/disk/sugi/dataset/ASPEC/preprocessed2/sp16k_t1600k_shared'
+    _SP_model_dir = '/disk/sugi/dataset/ASPEC/preprocessed/sp16k_t1500k_shared'
     _SP_model_prefix_source = _SP_model_dir + '/sp16k'
     _SP_model_prefix_target = _SP_model_prefix_source #vocabulary is shared
     _SP_model_file_source = _SP_model_prefix_source + ".model"
     _SP_model_file_target = _SP_model_prefix_target + ".model"
-
-    #original dataset
-    _source_train_orig = '/disk/sugi/dataset/ASPEC/extracted/train/train-1.en.txt'
-    _target_train_orig = '/disk/sugi/dataset/ASPEC/extracted/train/train-1.ja.txt'
-    _source_dev_orig = '/disk/sugi/dataset/ASPEC/extracted/dev/dev.en.txt'
-    _target_dev_orig = '/disk/sugi/dataset/ASPEC/extracted/dev/dev.ja.txt'
-    _source_test_orig = '/disk/sugi/dataset/ASPEC/extracted/test/test.en.txt'
-    _target_test_orig = '/disk/sugi/dataset/ASPEC/extracted/test/test.ja.txt'
 
 
     #Special tokens. Make sure these are consistent with the tokenization model settings.
@@ -122,12 +116,12 @@ class Config:
     UNK_ID = 3
 
     #Preprocessed dataset
-    source_train = '/disk/sugi/dataset/ASPEC/preprocessed2/train/train-1500k.en.txt'
-    target_train = '/disk/sugi/dataset/ASPEC/preprocessed2/train/train-1500k.ja.txt'
-    source_dev = '/disk/sugi/dataset/ASPEC/preprocessed2/dev/dev.en.txt' 
-    target_dev = '/disk/sugi/dataset/ASPEC/preprocessed2/dev/dev.ja.txt' 
-    source_test = '/disk/sugi/dataset/ASPEC/preprocessed2/test/test.en.txt' 
-    target_test = '/disk/sugi/dataset/ASPEC/preprocessed2/test/test.ja.txt' 
+    source_train = '/disk/sugi/dataset/ASPEC/preprocessed/train/train-1500k.en.txt'
+    target_train = '/disk/sugi/dataset/ASPEC/preprocessed/train/train-1500k.ja.txt'
+    source_dev = '/disk/sugi/dataset/ASPEC/preprocessed/dev/dev.en.txt' 
+    target_dev = '/disk/sugi/dataset/ASPEC/preprocessed/dev/dev.ja.txt' 
+    source_test = '/disk/sugi/dataset/ASPEC/preprocessed/test/test.en.txt' 
+    target_test = '/disk/sugi/dataset/ASPEC/preprocessed/test/test.ja.txt' 
 
     # tokenized dataset
     source_train_tok = _SP_model_dir + '/train/train-1500k.en.tok'
@@ -145,34 +139,6 @@ class Config:
     model_name = "model"
     logdir = os.path.dirname(__file__) + "/log"
     
-    def preprocess(texts, type, in_file=None, out_file=None):
-        """Preprocess texts
-        Args:
-            texts: input text. list of str. if in_file is specified this argument is ignored.
-            type: "source" or "target"
-            in_file: You can specify a file as the source instead of list of text. Default is None.
-            out_file: If None, this method returns list of str. If not None, outputs will be written into out_file. Default is None
-        Returns:
-            List of str if out_file is None, otherwise None"""
-        
-        if in_file is not None:
-            with codecs.open(in_file, "r") as f:
-                input_text = f.read()
-        else:
-            input_text = "\n".join(texts) + "\n"
-
-        t = "en" if type=="source" else "ja"
-        output_text = subprocess.check_output(
-            ["/disk/sugi/dataset/ASPEC/preprocess2.sh", t],
-            input=input_text.encode()).decode()
-            
-        if out_file is not None:
-            with codecs.open(out_file, "w") as f:
-                f.write(output_text)
-        else:
-            return output_text.strip().split("\n")
-
-
     def text2tokens(sents, type):
         """tokenize sentences into sequences of tokens
         
@@ -228,6 +194,65 @@ class Config:
         sp.Load(model)
         return [sp.DecodeIds(seq) for seq in seqs]
 
+
+    def preprocess(texts, type, in_file=None, out_file=None):
+        """Preprocess texts
+        Args:
+            texts: input text. list of str. if in_file is specified this argument is ignored.
+            type: "source" or "target"
+            in_file: You can specify a file as the source instead of list of text. Default is None.
+            out_file: If None, this method returns list of str. If not None, outputs will be written into out_file. Default is None
+        Returns:
+            List of str if out_file is None, otherwise None"""
+        
+        ###############################################
+        # NO NEED TO EDIT IN MOST CASES
+        ###############################################
+        if in_file is not None:
+            with codecs.open(in_file, "r") as f:
+                input_text = f.read()
+        else:
+            input_text = "\n".join(texts) + "\n"
+        ###############################################
+        ###############################################
+
+
+        ###############################################
+        # CHOOSE ONE METHOD TO PRODUCE `output_text`
+        ###############################################
+
+
+        ###############################################
+        # ASPEC Preprocessing Type 1
+        ###############################################
+        t = "en" if type=="source" else "ja"
+        output_text = subprocess.check_output(
+            ["/disk/sugi/dataset/ASPEC/preprocess.sh", t],
+            input=input_text.encode()).decode()
+        ###############################################
+        ###############################################
+        # ASPEC Preprocessing Type 2
+        ###############################################
+#        t = "en" if type=="source" else "ja"
+#        output_text = subprocess.check_output(
+#            ["/disk/sugi/dataset/ASPEC/preprocess2.sh", t],
+#            input=input_text.encode()).decode()
+        ###############################################
+        ###############################################
+
+
+        ###############################################
+        # NO NEED TO EDIT IN MOST CASES
+        ###############################################
+        if out_file is not None:
+            with codecs.open(out_file, "w") as f:
+                f.write(output_text)
+        else:
+            return output_text.strip().split("\n")
+        ###############################################
+        ###############################################
+
+
     def text2tokens_BLEU(texts):
         """Tokenize sentences for BLEU evaluation.
         Japanese texts are tokenized by kytea.
@@ -241,25 +266,75 @@ class Config:
         Returns:
             list of list of str."""
             
+        ###################################################
+        ## CHOOSE ONE METHOD TO PRODUCE `output` BELOW
+        ###################################################
             
-        kytea_input = ("\n".join(texts) + "\n").encode()
-        kytea_output = subprocess.check_output(["kytea", "-out", "tok"],
-                                               input=kytea_input).decode()
-        return [line.strip().split() for line in kytea_output.strip().split("\n")]
+
+        ####################################################
+        # Lang: ja
+        # Preprocesing Type: 2 (Not using kytea to tokenize)
+#        kytea_input = ("\n".join(texts) + "\n").encode()
+#        kytea_output = subprocess.check_output(["kytea", "-out", "tok"],
+#                                               input=kytea_input).decode()
+#        output = [line.strip().split() for line in kytea_output.strip().split("\n")]
+        #####################################################
+        #####################################################
+        # Lang: ja
+        # Preprocessing Type: 1 (Using kytea to tokenize)
+        # - Simply split by SPACE
+        output = [line.strip().split() for line in texts]
+        #####################################################
+        #####################################################
+        # Lang: en
+        # Preprocessing Type: Tokenization + Truecasing by MOSES toolkit
+        # - Simply split by SPACE
+#        output = [line.strip().split() for line in texts]
+        #####################################################
+
+        return output
 
 
 # preprocessing: Train sentencepiece with vocabulary size 32k shared by source/target
 if __name__ == '__main__':
+    basicConfig()
+    logger.setLevel(DEBUG)
     #Preprocessing
     if not os.path.exists(Config.source_train):
-        print("preprocessing the corpus")
-        subprocess.run(["/disk/sugi/dataset/ASPEC/preprocess2.sh", "init"])
+        logger.info("Preprocessed data ({}) was not found. Preprocessing the corpus.".format(Config.source_train))
+
+        #####################################################
+        # CHOOSE ONE BELOW
+        #####################################################
+
+
+        #####################################################
+        # Preprocessing Type 1
+        # en: Tokenization + Truecasing by Moses
+        # ja: Tokenization by Kytea
+        subprocess.run(['/disk/sugi/dataset/ASPEC/preprocess.sh', 'init'])
+        #####################################################
+        
+        #####################################################
+        # Preprocessing Type 1
+        # en: Tokenization + Truecasing by Moses
+        # ja: Nothing
+        #subprocess.run(["/disk/sugi/dataset/ASPEC/preprocess2.sh", "init"])
+        #####################################################
+
+        logger.info('Preprocessing done.')
+
+    else:
+        logger.info('Preprocessed corpus already exists.')
+
 
     if not os.path.exists(Config.source_train_tok):
+        logger.info('Subword corpus ({}) was not found.'.format(Config.source_train_tok))
+        logger.info('Creating subword corpus')
         #train sentencepiece with the preprocessed train data
         #!model dependent: in this model_config.py vocabulary is shared by source and target
         os.makedirs(Config._SP_model_dir, exist_ok=True)
-        print("Training sentencepiece")
+        logger.info("Training sentencepiece")
         spm.SentencePieceTrainer.Train(
             '--input={} '\
             '--model_prefix={} '\
@@ -299,9 +374,12 @@ if __name__ == '__main__':
             with codecs.open(src, 'r', 'utf-8') as src_file:
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
                 with codecs.open(dest, 'w', 'utf-8') as dest_file:
-                    print("Tokenizing {} to {}".format(src, dest))
+                    logger.info("Tokenizing {} into {}".format(src, dest))
                     for line in src_file:
                         encoded = sp.EncodeAsPieces(line.strip())
                         dest_file.write(" ".join(encoded) + "\n")
             
+    else:
+        logger.info('Subword format corpus already exists.')
 
+    logger.info('train/dev/test data are prepaired.')
