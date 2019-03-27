@@ -70,12 +70,12 @@ def positional_encoding(length, emb_size, name='positional_encoding'):
     #   sin(pos/(10000^(i/(emb_size/2)))) (0<=i<emb_size/2)
     #   cos(pos/(10000^(i/(emb_size/2)))) (emb_size/2<=i<emb_size)
     with tf.name_scope(name):
-        pos = tf.range(length, dtype=tf.float32)
+        pos = tf.range(tf.cast(length, tf.float32))
         half = emb_size // 2
         i = tf.range(half, dtype=tf.float32)
         scaled_time = (
             tf.expand_dims(pos, axis=1) /
-            tf.expand_dims(tf.pow(10000, i / half), axis=0)
+            tf.expand_dims(tf.pow(10000.0, i / half), axis=0)
             )
         return tf.concat([tf.sin(scaled_time), tf.cos(scaled_time)], axis=1)
 
@@ -108,7 +108,6 @@ class Multihead_attention(tf.layers.Layer):
         super().__init__(*args, **kwargs)
         self.hidden_size = hidden_size
         self.n_heads = n_heads
-        self.causality = causality
         self.dropout_rate = dropout_rate
 
     def build(self, input_shape):
@@ -118,7 +117,7 @@ class Multihead_attention(tf.layers.Layer):
         self.att_out_layer = tf.layers.Dense(self.hidden_size, use_bias=False, name='attention_output')
         super().build(input_shape)
 
-    def call(self, query, dictionary, mask, training=False, cache=None):
+    def call(self, query, dictionary, bias, training=False, cache=None):
         head_size = self.hidden_size // self.n_heads
         
         q = self.q_layer(query) # [batch, length, emb_size]
@@ -126,10 +125,11 @@ class Multihead_attention(tf.layers.Layer):
         v = self.v_layer(dictionary)
 
         if cache is not None:
-            k = tf.concat([cache['k'], v], axis=1)
-            v = tf.concat([cache['v'], v], axis=1)
-            cache['k'] = k
-            cache['v'] = v
+            with tf.name_scope('layer_cache_extension'):
+                k = tf.concat([cache['k'], k], axis=1)
+                v = tf.concat([cache['v'], v], axis=1)
+                cache['k'] = k
+                cache['v'] = v
 
         q = tf.stack(tf.split(q, self.n_heads, axis=-1), axis=1) # [batch, nheads, length_q, head_size]
         k = tf.stack(tf.split(k, self.n_heads, axis=-1), axis=1) # [batch, nheads, length_k, head_size]
@@ -145,11 +145,15 @@ class Multihead_attention(tf.layers.Layer):
 
         outputs = tf.matmul(weight, v) # [batch, nheads, length_q, head_size]
 
-        outputs = tf.concat(tf.split(outputs, self.n_heads, axis=1), axis=3)[:,1] # [batch, length_q, emb_size]
+        outputs = tf.concat(tf.unstack(outputs, axis=1), axis=2) # [batch, length_q, emb_size]
 
         outputs = self.att_out_layer(outputs)
 
         return outputs
+
+class SelfAttention(Multihead_attention):
+    def call(self, inputs, *args, **kwargs):
+        return super().call(inputs, inputs, *args, **kwargs)
 
 class Feedforward(tf.layers.Layer):
     def __init__(self, n_units, dropout_rate, *args, **kwargs):
@@ -169,7 +173,7 @@ class Feedforward(tf.layers.Layer):
         return outputs
 
 def label_smoothing(labels, eps=0.1):
-    return (1 - eps) * labels + (eps/tf.shape(labels)[-1])
+    return (1 - eps) * labels + (eps/tf.cast(tf.shape(labels)[-1], tf.float32))
 
 class BlockWrapper(tf.layers.Layer):
     def __init__(self, layer, hparams, *args, **kwargs):
@@ -194,15 +198,15 @@ class Encoder(tf.layers.Layer):
     def __init__(self, hparams, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.hparams = hparams
+        self.embedding_layer = Embedding_layer(self.hparams.vocab_size, self.hparams.embed_size)
 
     def build(self, input_shape):
-        self.embedding_layer = Embedding_layer(self.hparams.vocab_size, self.hparams.embed_size)
 
         self.blocks = []
         for i in range(self.hparams.n_blocks):
             layer_name = 'layer_{}'.format(i)
             self.blocks.append((
-                BlockWrapper(Multihead_attention(self.hparams.attention_size,
+                BlockWrapper(SelfAttention(self.hparams.attention_size,
                                                  self.hparams.n_heads,
                                                  self.hparams.dropout_rate,
                                                  name='{}_{}'.format(layer_name, 'self_attention')),
@@ -221,7 +225,7 @@ class Encoder(tf.layers.Layer):
         outputs = tf.layers.dropout(outputs, self.hparams.dropout_rate, training=training)
 
         for self_attn, ff in self.blocks:
-            outputs = self_attn(outputs, outputs, self_attn_bias, training=training)
+            outputs = self_attn(outputs, self_attn_bias, training=training)
             outputs = ff(outputs, training=training)
 
         return self.output_norm(outputs)
@@ -235,7 +239,7 @@ class Decoder(tf.layers.Layer):
     def build(self, input_shape):
         if self.embedding_layer is None:
             self.embedding_layer = Embedding_layer(self.hparams.vocab_size, self.hparams.embed_size)
-        else
+        else:
             # if the embedding layer is owned by another Layer it must be built until now
             # in order to avoid ambiguous variable scope tree
             assert self.embedding_layer.built
@@ -244,7 +248,7 @@ class Decoder(tf.layers.Layer):
         for i in range(self.hparams.n_blocks):
             layer_name = 'layer_{}'.format(i)
             self.blocks.append((
-                BlockWrapper(Multihead_attention(self.hparams.attention_size,
+                BlockWrapper(SelfAttention(self.hparams.attention_size,
                                                  self.hparams.n_heads,
                                                  self.hparams.dropout_rate,
                                                  name='{}_{}'.format(layer_name, 'self_attention')),
@@ -265,25 +269,23 @@ class Decoder(tf.layers.Layer):
         super().build(input_shape)
 
     def call(self, inputs, enc_outputs, self_attn_bias, ctx_attn_bias, training=False, cache=None):
+        if cache is None:
+            seq_start = 0
+            seq_end = tf.shape(inputs)[1]
+        else:
+            cache_l0_v = cache['layer_0']['v']
+            seq_start = tf.shape(cache_l0_v)[1]
+            seq_end = seq_start + tf.shape(inputs)[1]
+
         outputs = self.embedding_layer(inputs)
-        outputs = outputs + positional_encoding(tf.shape(inputs)[1], self.hparams.emb_size)
+        outputs = outputs + positional_encoding(seq_end, self.hparams.embed_size)[seq_start:]
         outputs = tf.layers.dropout(outputs, self.hparams.dropout_rate, training=training)
-
-        self_attn_bias = make_attention_bias_triangle(tf.shape(inputs)[1])
-
-        if cache is not None and cache.get('layer_0') is None:
-            # initialize cache
-            batch_size = tf.shape(inputs)[0]
-            for layer in range(self.blocks):
-                layer_name = 'layer_{}'.format(layer)
-                cache[layer_name] = {'k': tf.zeros([batch_size, 0, self.hparams.attention_size]),
-                                     'v': tf.zeros([batch_size, 0, self.hparams.attention_size])}
 
         for i, (self_attn, ctx_attn, ff) in enumerate(self.blocks):
             layer_name = 'layer_{}'.format(i)
             layer_cache = cache[layer_name] if cache is not None else None
 
-            outputs = self_attn(outputs, outputs, self_attn_bias, training=training, cache=layer_cache)
+            outputs = self_attn(outputs, self_attn_bias, training=training, cache=layer_cache)
             outputs = ctx_attn(outputs, enc_outputs, ctx_attn_bias, training=training)
             outputs = ff(outputs, training=training)
         
@@ -309,10 +311,12 @@ class Transformer(tf.layers.Layer):
 
     def call(self, inputs, lengths, dec_inputs, dec_lengths, training=False):
         # this method is called only by self.instantiate to instantiate variables of this Layer
-        enc_self_attn_bias = make_attention_bias_from_seq_mask(lengths, tf.shape(inputs)[1])
+        with tf.name_scope('enc_self_attn_bias'):
+            enc_self_attn_bias = make_attention_bias_from_seq_mask(lengths, tf.shape(inputs)[1])
         enc_outputs = self.encoder(inputs, enc_self_attn_bias, training=training)
 
-        dec_self_attn_bias = make_attention_bias_triangle(tf.shape(dec_inputs)[1])
+        with tf.name_scope('dec_self_attn_bias'):
+            dec_self_attn_bias = make_attention_bias_triangle(tf.shape(dec_inputs)[1])
         dec_ctx_attn_bias = enc_self_attn_bias
         dec_outputs = self.decoder(dec_inputs, enc_outputs, dec_self_attn_bias, dec_ctx_attn_bias, training=training, cache=None)
         return dec_outputs
@@ -321,9 +325,12 @@ class Transformer(tf.layers.Layer):
         """create dummy graph instance of this Layer in order to place variables in a specific device."""
         if self.built:
             return
-        x = tf.zeros([2,2], dtype=tf.int32)
-        x_len = tf.ones([2], dtype=tf.int32)
-        self(x, x_len, x, x_len)
+        with tf.name_scope('dummy_inputs'):
+            x = tf.placeholder(tf.int32, [100, None], 'x')
+            x_len = tf.placeholder(tf.int32, [100], 'x_len')
+            y = tf.placeholder(tf.int32, [100, None], 'y')
+            y_len = tf.placeholder(tf.int32, [100], 'y_len')
+        self(x, x_len, y, y_len)
 
     def get_logits(self, x, y, x_len, y_len, training=False):
         """Compute logits given inputs for encoder and decoder.
@@ -338,7 +345,7 @@ class Transformer(tf.layers.Layer):
             """
         assert self.built
         enc_self_attn_bias = make_attention_bias_from_seq_mask(x_len, tf.shape(x)[1])
-        enc_outputs = self.encoder(x, x_len, training=training)
+        enc_outputs = self.encoder(x, enc_self_attn_bias, training=training)
 
         dec_self_attn_bias = make_attention_bias_triangle(tf.shape(y)[1])
         dec_ctx_attn_bias = enc_self_attn_bias
@@ -360,24 +367,51 @@ class Transformer(tf.layers.Layer):
             [batch, beam_size]) is returned. Otherwise a Tensor [batch, length] is returned."""
 
         assert self.built
-        enc_self_attn_bias = make_attention_bias_from_seq_mask(x_len, tf.shape(x)[1])
-        enc_outputs = self.encoder(x, x_len, training=False)
+        with tf.name_scope('enc_self_attn_bias'):
+            enc_self_attn_bias = make_attention_bias_from_seq_mask(x_len, tf.shape(x)[1])
+        enc_outputs = self.encoder(x, enc_self_attn_bias, training=False)
 
-        cache = {
-            'enc_outputs': enc_outputs,
-            'dec_ctx_attn_bias': enc_self_attn_bias
-            }
-        maxlen = tf.shape(x)[1] * 3 # hard coding
-        dec_self_attn_bias = make_attention_bias_triangle(maxlen)
+        # initial cache
+        with tf.name_scope('init_cache'):
+            cache = {
+                'enc_outputs': enc_outputs,
+                'dec_ctx_attn_bias': enc_self_attn_bias
+                }
+
+            batch_size = tf.shape(x)[0]
+            for layer in range(self.hparams.n_blocks):
+                layer_name = 'layer_{}'.format(layer)
+                with tf.name_scope('cache_{}'.format(layer_name)):
+                    cache[layer_name] = {'k': tf.zeros([batch_size, 0, self.hparams.attention_size]),
+                                         'v': tf.zeros([batch_size, 0, self.hparams.attention_size])}
+
+        with tf.name_scope('max_length'):
+            maxlen = tf.shape(x)[1] * 2 + 5 # hard coding
+
+        with tf.name_scope('dec_self_attn_bias'):
+            dec_self_attn_bias = make_attention_bias_triangle(maxlen)
 
         def get_logits_fn(dec_inputs, cache):
+            cache_l0_v = cache['layer_0']['v']
+            seq_start = tf.shape(cache_l0_v)[1]
+            seq_end = seq_start + tf.shape(dec_inputs)[1]
             length = tf.shape(dec_inputs)[1]
+            """
+            decoder self-attention is from dec_inputs (shape [batch, n, emb]) to concat(cache, dec_inputs).
+            So the bias matrix used here is of shape [n, length] which is a sub part of the real bias matrix
+            for the real self-attention (from concat(cache, dec_inputs) to concat(cache, dec_inputs)):
+            RMatrix[start:end, 0:end]
+
+            """
+            _self_attn_bias = dec_self_attn_bias[:, :, seq_start:seq_end, :seq_end]
             outputs = self.decoder(dec_inputs,
                                    cache['enc_outputs'],
-                                   dec_self_attn_bias[:,:,:length,:length],
+                                   _self_attn_bias,
                                    cache['dec_ctx_attn_bias'],
                                    training=False,
                                    cache=cache)
+            return outputs
+
         beam_candidates, scores = beam_search_decode(get_logits_fn,
                                                      cache,
                                                      beam_size,
@@ -430,10 +464,11 @@ def beam_search_decode(get_logits_fn, init_cache, beam_size, maxlen, eos_id, pad
 
         """
     
-    batch_size = tf.shape(nest.flatten(init_cache)[0])[0]
+    with tf.name_scope('batch_size'):
+        batch_size = tf.shape(nest.flatten(init_cache)[0])[0]
 
     def length_penalty(length, alpha):
-        return tf.pow((5 + length)/(1 + 5), alpha)
+        return tf.cast(tf.pow((5 + length)/(1 + 5), alpha), dtype=tf.float32)
 
     def get_shape_keep_last_dim(x):
         orig_shape = x.shape.as_list()
@@ -442,12 +477,22 @@ def beam_search_decode(get_logits_fn, init_cache, beam_size, maxlen, eos_id, pad
         return tf.TensorShape(shape)
 
     def flatten(batch):
-        shape_after = tf.concat([[-1], tf.shape(batch)[2:]], axis=0)
+        # [batch_size, b, ...] -> [batch_size*b, ...]
+        shape_before = tf.shape(batch)
+        shape_after = tf.concat([[shape_before[0] * shape_before[1]], tf.shape(batch)[2:]], axis=0)
         return tf.reshape(batch, shape_after)
 
+    def pack(flat_batch):
+        # [batch_size*b, ...] -> [batch_size, b, ...]
+        shape_after = tf.concat([[batch_size, -1], tf.shape(flat_batch)[1:]], axis=0)
+        return tf.reshape(flat_batch, shape_after)
+
     def fork(batch):
-        target_shape = batch.shape.as_list() # initial shape: [batch_size, b, ...]
-        target_shape[1] = -1 # [batch_size, -1, ...]
+        # [batch_size, b, ...] -> [batch_size, b*beam_size, ...]
+        #target_shape = tf.unstack(tf.shape(batch), axis=0) # initial shape: [batch_size, b, ...]
+        #target_shape[1] = -1
+        shape_before = tf.shape(batch)
+        target_shape = tf.concat([shape_before[:1], shape_before[1:2] * beam_size, shape_before[2:]], axis=0)
         batch = tf.expand_dims(batch, axis=2) # [batch_size, b, 1, ...]
         tile = [1] * len(batch.shape.as_list())
         tile[2] = beam_size
@@ -457,108 +502,136 @@ def beam_search_decode(get_logits_fn, init_cache, beam_size, maxlen, eos_id, pad
         return batch
 
     def cond_fn(loop_vars):
-        return tf.reduce_all(loop_vars['has_eos'])
+        return tf.logical_not(tf.reduce_all(loop_vars['has_eos']), name='loop_condition')
 
     def body_fn(loop_vars):
 
+        with tf.name_scope('loop_body'):
+            # beam duplication number (1 or beam_size)
+            b = tf.shape(loop_vars['generated_seq'], name='n_parent_forks')[1]
 
-        # beam duplication number (1 or beam_size)
-        b = tf.shape(loop_varsp['generated_seq'])[1]
+            dec_inputs = tf.cond(tf.equal(0, tf.shape(loop_vars['generated_seq'])[2]),
+                                  lambda: init_dec_inputs,
+                                  lambda: loop_vars['generated_seq'][:, :, -1:], name='dec_inputs')
+            # flatten cache and dec_inputs
+            with tf.name_scope('flatten_inputs'):
+                flat_cache = nest.map_structure(flatten, loop_vars['cache'])
+                flat_dec_inputs = flatten(dec_inputs)
 
-        # flatten cache and dec_inputs
-        flat_cache = flatten(loop_vars['cache'])
-        dec_inputs = tf.cond(tf.equal(0, tf.shape(generated_seq)[2]),
-                              init_dec_inputs,
-                              generated_seq[:, :, -1:])
-        flat_dec_inputs = flatten(dec_inputs)
+            # get the next logits
+            # flat_cache is updated there
+            with tf.name_scope('get_logits_and_update_layer_cache'):
+                logits = get_logits_fn(flat_dec_inputs, flat_cache) # [batch_size*b, 1, vocab_size]
 
-        # get the next logits
-        logits = get_logits_fn(flat_dec_inputs, flat_cache) # [batch_size*b, 1, vocab_size]
+            # restore shape of cache and update
+            with tf.name_scope('update_and_restore_structure_of_cache'):
+                loop_vars['cache'] = nest.map_structure(pack, flat_cache)
 
-        # get the top k=beam_size for each sequence
-        top_logits, ids = tf.math.top_k(logits, beam_size, False) # [batch_size*b, 1, beam_size]
+            with tf.name_scope('preliminary_top_ids_and_log_probs'):
+                # get the top k=beam_size for each sequence
+                top_logits, ids = tf.math.top_k(logits, beam_size, False, name='preliminary_tops') # [batch_size*b, 1, beam_size]
 
-        # get the log probabilities
-        log_prob = top_logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True) #[batch_size*b, 1, beam_size] 
-        # restore shape of log_prob and ids into forked style (parent nodes -> child nodes)
-        log_prob = tf.reshape(log_prob, [batch_size, b * beam_size]) # [batch_size, b*beam_size]
-        ids = tf.reshape(ids, [batch_size, b * beam_size, 1]) # [batch_size, b*beam_size, 1]
+                # get the log probabilities
+                with tf.name_scope('logits_to_log_prob'):
+                    log_prob = top_logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True) #[batch_size*b, 1, beam_size] 
+                # restore shape of log_prob and ids into forked style (parent nodes -> child nodes)
+                with tf.name_scope('restore_shape'):
+                    log_prob = tf.reshape(log_prob, [batch_size, b * beam_size]) # [batch_size, b*beam_size]
+                    ids = tf.reshape(ids, [batch_size, b * beam_size, 1]) # [batch_size, b*beam_size, 1]
 
-        # fork tensors. tile and reshape tensors into the shape [batch_size, b*beam_size, ...]
-        forked_vars = nest.map_structure(fork, loop_vars)
+            # fork tensors. tile and reshape tensors into the shape [batch_size, b*beam_size, ...]
+            with tf.name_scope('fork_state_vars'):
+                forked_vars = nest.map_structure(fork, loop_vars)
 
-        # calculate updated log probabilities and sequences and scores
-        forked_vars['generated_seq'] = tf.concat([
-            forked_vars['generated_seq'],
-            tf.where(tf.expand_dims(forked_vars['has_eos'], axis=-1),
-                     tf.ones_like(ids, dtype=tf.int32) * pad_id,
-                     ids)
-            ], axis=2)
-        forked_vars['seq_log_prob'] = tf.where(forked_vars['has_eos'],
-                                               forked_vars['seq_log_prob'],
-                                               forked_vars['seq_log_prob'] + log_prob)
-        forked_vars['score'] = tf.where(forked_vars['has_eos'],
-                                        forked_vars['score'],
-                                        forked_vars['seq_log_prob'] / length_penalty(tf.shape(forked_vars['generated_seq'])[2], alpha))
+            # calculate updated log probabilities and sequences and scores
+            with tf.name_scope('update_sequence'):
+                forked_vars['generated_seq'] = tf.concat([
+                    forked_vars['generated_seq'],
+                    tf.where(tf.expand_dims(forked_vars['has_eos'], axis=-1),
+                             tf.ones_like(ids, dtype=tf.int32) * pad_id,
+                             ids)
+                    ], axis=2, name='updated_sequence')
 
-        # update has_eos
-        forked_vars['has_eos'] = tf.math.logical_or(forked_vars['has_eos'],
-                                                    tf.equal(eos_id, tf.reshape(ids, [batch_size, -1])))
+            with tf.name_scope('update_log_prob'):
+                forked_vars['seq_log_prob'] = tf.where(forked_vars['has_eos'],
+                                                       forked_vars['seq_log_prob'],
+                                                       forked_vars['seq_log_prob'] + log_prob, name='new_log_prob')
 
-        # take top k=beam_size
-        top_scores, top_indices = tf.math.top_k(forked_vars['score'], beam_size, True) # [batch_size, beam_size]
+            with tf.name_scope('update_scores'):
+                forked_vars['score'] = tf.where(forked_vars['has_eos'],
+                                                forked_vars['score'],
+                                                forked_vars['seq_log_prob'] / length_penalty(tf.shape(forked_vars['generated_seq'])[2], alpha), name='new_scores')
 
-        new_vars = nest.map_structure(lambda x:tf.batch_gather(x, top_indices), forked_vars)
+            # update has_eos
+            with tf.name_scope('update_eos'):
+                forked_vars['has_eos'] = tf.math.logical_or(forked_vars['has_eos'],
+                                                            tf.equal(eos_id, tf.reshape(ids, [batch_size, -1])),
+                                                            name='new_has_eos')
 
-        return [new_vars]
+            # take top k=beam_size
+            with tf.name_scope('choose_top_candidates'):
+                top_scores, top_indices = tf.math.top_k(forked_vars['score'], beam_size, True, name='alive_candidates') # [batch_size, beam_size]
+
+                new_vars = nest.map_structure(lambda x:tf.batch_gather(x, top_indices), forked_vars)
+
+        return new_vars
 
     # initial decoder inputs
     if init_dec_inputs is None:
-        init_dec_inputs = tf.ones([batch_size, 1, 1], dtype=tf.int32) * sos_id
-    #cache, generated_seq, seq_log_prob, has_eos, score
-    init_loop_vars = {
-        'cache': tf.expand_dims(cache, axis=1),
-        'generated_seq': tf.zeros([batch_size, 1, 0]),
-        'seq_log_prob': tf.ones([batch_size, 1]),
-        'has_eos': tf.zeros([batch_size, 1], dtype=tf.bool),
-        'score': tf.zeros([batch_size, 1])
+        with tf.name_scope('init_dec_inputs'):
+            init_dec_inputs = tf.ones([batch_size, 1, 1], dtype=tf.int32) * sos_id
 
-    }
+    #cache, generated_seq, seq_log_prob, has_eos, score
+    with tf.name_scope('init_loop_vars'):
+        init_loop_vars = {
+            'cache': nest.map_structure(lambda x: tf.expand_dims(x, 1), init_cache),
+            'generated_seq': tf.zeros([batch_size, 1, 0], dtype=tf.int32),
+            'seq_log_prob': tf.zeros([batch_size, 1]),
+            'has_eos': tf.zeros([batch_size, 1], dtype=tf.bool),
+            'score': tf.zeros([batch_size, 1])
+        }
 
     # shape invariants
-    shape_invariants = {
-        'cache': nest.map_structure(get_shape_keep_last_dim, init_loop_vars['cache']),
-        'generated_seq': tf.TensorShape([None, None, None]),
-        'seq_log_prob': tf.TensorShape([None, None]),
-        'has_eos': tf.TensorShape(None, None),
-        'score': tf.TensorShape([None, None])
-    }
+    with tf.name_scope('shape_invariants'):
+        shape_invariants = {
+            'cache': nest.map_structure(get_shape_keep_last_dim, init_loop_vars['cache']),
+            'generated_seq': tf.TensorShape([None, None, None]),
+            'seq_log_prob': tf.TensorShape([None, None]),
+            'has_eos': tf.TensorShape([None, None]),
+            'score': tf.TensorShape([None, None])
+        }
 
-    finish_state = tf.while_loop(
-        cond_fn,
-        body_fn,
-        [init_loop_vars],
-        [shape_invariants],
-        back_prop=False,
-        maximum_iterations=maxlen,
-        parallel_iterations=1
-        )
+    with tf.name_scope('while_loop'):
+        finish_state = tf.while_loop(
+            cond_fn,
+            body_fn,
+            [init_loop_vars],
+            shape_invariants,
+            back_prop=False,
+            maximum_iterations=maxlen,
+            parallel_iterations=1
+            )
 
-    # non-finished sequences get very low score
-    finish_state['seq_log_prob'] = tf,where(finish_state['has_eos'],
-                                            finish_state['seq_log_prob'],
-                                            tf.fill(tf.shape(finish_state['seq_log_prob']), -1e9))
-    finish_state['score'] = tf.where(finish_state['has_eos'],
-                                     finish_state['score'],
-                                     tf.fill(tf.shape(finish_state['score']), -1e9))
+    with tf.name_scope('post_processing'):
+        # non-finished sequences get very low score
+        finish_state['seq_log_prob'] = tf.where(finish_state['has_eos'],
+                                                finish_state['seq_log_prob'],
+                                                tf.fill(tf.shape(finish_state['seq_log_prob']), -1e9))
+        finish_state['score'] = tf.where(finish_state['has_eos'],
+                                         finish_state['score'],
+                                         tf.fill(tf.shape(finish_state['score']), -1e9))
 
-    # add EOS at the end of all unfinished sequences
-    finish_state['generated_seq'] = tf.concat([
-            finish_state['generated_seq'][:,:,:-1],
-            tf.where(tf.expand_dims(finish_state['has_eos'], axis=-1),
-                     finish_state['generated_seq'][:,:,-1:],
-                     tf.fill(tf.shape(finish_state['generated_seq'][:,:,-1:]),eos_id)
-        ]), axis=2)
+        # add EOS at the end of all unfinished sequences
+        finish_state['generated_seq'] = tf.concat([
+                finish_state['generated_seq'][:,:,:-1],
+                tf.where(tf.expand_dims(finish_state['has_eos'], axis=-1),
+                         finish_state['generated_seq'][:,:,-1:],
+                         tf.fill(tf.shape(finish_state['generated_seq'][:,:,-1:]),eos_id))
+            ], axis=2)
 
+        # Fianal sort
+        with tf.name_scope('final_sort'):
+            score, indices = tf.math.top_k(finish_state['score'], beam_size, sorted=True)
+            seq = tf.batch_gather(finish_state['generated_seq'], indices)
 
-    return finish_state['generated_seq'], finish_state['score']
+    return seq, score

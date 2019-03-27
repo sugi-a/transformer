@@ -3,14 +3,15 @@ import sys
 import codecs
 import argparse
 import time
-from logging import getLogger, StreamHandler, DEBUG
+from logging import getLogger, StreamHandler, DEBUG, basicConfig
+logger = getLogger(__name__)
+logger.setLevel(DEBUG)
 import tensorflow as tf
 from tensorflow.contrib.framework import nest
 import numpy as np
 
 from utils import *
 from model import *
-from translate import Inference
 import dataprocessing
 
 
@@ -18,9 +19,16 @@ def get_train_info(y, y_len, dec_outputs):
     """returns loss, accuracy, ntokens"""
 
     is_target = tf.sequence_mask(y_len, tf.shape(y)[1], dtype=tf.float32)
-    loss = tf.losses.softmax_cross_entropy(y, dec_outputs, is_target, label_smoothing=0.1)
-    accuracy = tf.cast(tf.equal(y, dec_outputs), dtype=tf.float32) * is_target
     ntokens = tf.reduce_sum(is_target)
+    y_onehot = tf.one_hot(y, tf.shape(dec_outputs)[-1])
+    prediction = tf.cast(tf.math.argmax(dec_outputs, axis=-1), tf.int32)
+    #loss = tf.losses.softmax_cross_entropy(y_onehot, dec_outputs, is_target, label_smoothing=0.1)
+    loss = tf.nn.softmax_cross_entropy_with_logits_v2(
+        labels=label_smoothing(y_onehot),
+        logits=dec_outputs)
+    loss = tf.reduce_sum(loss * is_target) / ntokens
+    
+    accuracy = tf.reduce_sum(tf.cast(tf.equal(y, prediction), dtype=tf.float32) * is_target) / ntokens
 
     return loss, accuracy, ntokens
 
@@ -32,23 +40,32 @@ def get_learning_rate(step, warm_up_step, embed_size):
     return rate
 
 def train():
-    logger = getLogger('Train')
-    logger.setLevel(DEBUG)
-    logger_handler = StreamHandler()
-    logger_handler.setLevel(DEBUG)
-    logger.addHandler(logger_handler)
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model_dir',
-                        required=True,
-                        help='Path to the directory containing `model_config.py`')
-    parser.add_argument('--n_cpu_cores',
-                        default=8,
-                        type=int)
-    parser.add_argument('--n_gpus',
-                        default=1,
-                        type=int)
+    basicConfig()
+    logger.info('Start.')
+    print('start')
+    
+    parser = argparse.ArgumentParser('train transformer')
+    parser.add_argument('--model_dir', required=True,
+        help="Path of the directory which has model_config.py (required)")
+    parser.add_argument('--n_cpu_cores', default=8, type=int,
+        help="Number of CPU cores this script can use when preprocessing dataset")
+    parser.add_argument('--n_gpus', default=1, type=int,
+        help="Number of GPUs.")
     args = parser.parse_args()
+
+#    parser = argparse.ArgumentParser()
+#    parser.add_argument('--model_dir',
+#                        required=True,
+#                        help='Path to the directory containing `model_config.py`')
+#    parser.add_argument('--n_cpu_cores',
+#                        default=8,
+#                        type=int,
+#                        help='Number of cpu cores used by `tf.data.Dataset.map`')
+#    parser.add_argument('--n_gpus',
+#                        default=1,
+#                        type=int,
+#                        help='Number of GPUs available')
+#    args = parser.parse_args()
 
     sys.path.insert(0, args.model_dir)
     import model_config
@@ -56,6 +73,7 @@ def train():
     from model_config import Hyperparams
     from model_config import Config
 
+    from translate import Inference
 
     # train dataset
     train_data = (dataprocessing.make_dataset_source_target(
@@ -87,7 +105,7 @@ def train():
         .padded_batch(model_config.Hyperparams.batch_size // args.n_gpus,
                       (([None], []), ([None], [])),
                       ((Config.PAD_ID, 0), (Config.PAD_ID, 0)))\
-        .prefetch(args.n_gpu * 2)
+        .prefetch(args.n_gpus * 2)
 
     # train/dev iterators and input tensors
     train_iterator = train_data.make_initializable_iterator()
@@ -107,14 +125,17 @@ def train():
     global_step_var = tf.train.get_or_create_global_step()
     lr = get_learning_rate(global_step_var, Hyperparams.warm_up_step, Hyperparams.embed_size)
     optimizer = tf.train.AdamOptimizer(lr)
-    train_vars = tf.get_collection(tf.GraphKeys, scope=model.scope_name)
+    train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=model.scope_name)
 
     def _train_info(inputs):
         (x, x_len), (y, y_len) = inputs
         logits = model.get_logits(x, y, x_len, y_len, True)
         loss, accuracy, ntokens = get_train_info(y, y_len, logits)
         grad_vars = optimizer.compute_gradients(loss, var_list=train_vars)
-        grads = [grad for grad, v in zip(grad_vars)]
+        grads, _ = zip(*grad_vars)
+
+        logger.debug(str(all([x is y for x,y in zip(train_vars, _)])))
+
         return {'loss': loss, 'accuracy': accuracy, 'gradient': grads}, ntokens
 
     train_info, _ = compute_parallel_and_average(_train_info, train_parallel_inputs, averaging_device='/cpu:0')
@@ -122,7 +143,7 @@ def train():
     # updating parameters
     with tf.device('/cpu:0'):
         grad_vars = [(grad, v) for grad, v in zip(train_info['gradient'], train_vars)]
-        train_info['train_op'] = optimizer.apply_gradients(grad_vars)
+        train_info['train_op'] = optimizer.apply_gradients(grad_vars, global_step=global_step_var)
 
     # dev ops and info
     def _dev_info(inputs):
@@ -141,17 +162,17 @@ def train():
     summary_dir = Config.logdir + '/summary'
     checkpoint_dir = Config.logdir + '/checkpoint'
     dev_bleu_dir = Config.logdir + '/dev_bleu_log'
-    for p in [Config.logdir, summary_dir, checkpoint_dir]:
+    for p in [Config.logdir, summary_dir, checkpoint_dir, dev_bleu_dir]:
         if not os.path.exists(p):
             os.mkdir(p)
 
     saver = tf.train.Saver(max_to_keep=12)
 
-    summary_writer = tf.summary.FileWriter(summary_dir)
+    summary_writer = tf.summary.FileWriter(summary_dir, tf.get_default_graph())
     
     train_summary_op = tf.summary.merge([
         tf.summary.scalar('accuracy', train_info['accuracy']),
-        tf.summary.scalar('mean_loss', train_info['loss']),
+        tf.summary.scalar('loss', train_info['loss']),
         tf.summary.scalar('learning_rate', lr)
         ])
 
@@ -167,7 +188,7 @@ def train():
     sess_config = tf.ConfigProto()
     sess_config.allow_soft_placement = True
 
-    with tf.Session(config=sess_config):
+    with tf.Session(config=sess_config) as sess:
         logger.info('Session started.')
 
         # initialization
@@ -193,9 +214,9 @@ def train():
 
             # BLEU evaluation
             logger.info('Computing BLEU score')
-            score = inference.BLEU_evaluation(Config.source_test_tok,
-                                              Config.target_test_tok,
-                                              beam_size=4,
+            score = inference.BLEU_evaluation(Config.source_dev_tok,
+                                              Config.target_dev_tok),
+                                              beam_size=1,
                                               session=sess,
                                               result_file_prefix=dev_bleu_dir+'/step_{}'.format(global_step))
             logger.info('Computing BLEU score done. {}'.format(score))
@@ -212,18 +233,20 @@ def train():
 
             # Epoch-local step counter
             local_step = 0
-            local_start_time = time.time()
+            step_time = time.time()
+            sec_per_step = 10
 
+            logger.info('New epoch starts.')
             # Training loop
             while True:
                 try:
-                    if global_step % 500 == 0:
+                    if global_step % (200) == 0:
                         train_summary, global_step, _ = sess.run([train_summary_op,
                                                                   global_step_var,
                                                                   train_info['train_op']])
 
                         # write summary of train data
-                        summary_writer.add_summary(train_summary, global_step - 1)
+                        summary_writer.add_summary(train_summary, global_step)
 
                         # dev
                         sess.run(dev_info_avg.init_op)
@@ -234,14 +257,16 @@ def train():
                             except tf.errors.OutOfRangeError:
                                 break
                         dev_summary = sess.run(dev_summary_op)
-                        summary_writer.add_summary(dev_summary, global_step - 1)
+                        summary_writer.add_summary(dev_summary, global_step)
 
-                        # Logger. Pring sec/step
-                        logger.info('{} sec/step.'.format((time.time() - local_start_time)/(local_step+1)))
                     else:
                         global_step, _ = sess.run([global_step_var, train_info['train_op']])
 
                     local_step += 1
+                    _ = step_time
+                    step_time = time.time()
+                    sec_per_step = sec_per_step * 0.9 + (step_time - _) * 0.1
+                    sys.stderr.write('{} sec/step. local step: {}     \r'.format(sec_per_step, local_step))
                 except tf.errors.OutOfRangeError:
                     break
 

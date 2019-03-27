@@ -104,6 +104,6 @@ def make_dataset_single_from_texts(texts, vocab_file_name, UNK_ID, EOS_ID, ncpu=
                 num_oov_buckets=0,
                 default_value=UNK_ID,
                 key_column_index=0)
-    dataset = tf.data.Dataset.from_generator(lambda:texts, tf.string, tf.TensorShape([]))
+    dataset = tf.data.Dataset.from_tensor_slices(texts)
     return dataset.map(lambda s: __string2sequence(s, EOS_ID, table), ncpu)
 

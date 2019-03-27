@@ -9,9 +9,6 @@ import time
 from logging import getLogger, StreamHandler, DEBUG
 logger = getLogger('Translator')
 logger.setLevel(DEBUG)
-logger_handler = StreamHandler()
-logger_handler.setLevel(DEBUG)
-logger.addHandler(logger_handler)
 
 from nltk.translate.bleu_score import corpus_bleu
 
@@ -20,12 +17,13 @@ from utils import *
 import dataprocessing
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--model_dir', required=True)
-args = parser.parse_args()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_dir', required=True)
+    args = parser.parse_args()
 #insert model_config's dir prior to this script's dir'''
-if sys.path[0] != args.model_dir:
-    sys.path.insert(0, args.model_dir)
+    if sys.path[0] != args.model_dir:
+        sys.path.insert(0, args.model_dir)
 
 import model_config
 logger.info("model_config has been loaded from {}".format(model_config.__file__))
@@ -49,10 +47,11 @@ class Inference:
                 graph = tf.get_default_graph()
             self.graph = graph
 
-            self.model = Transformer(Hyperparams, Config)
-            # place variables in the device /cpu:0
-            with tf.device('/cpu:0'):
-                self.model.instanciate_vars()
+            with self.graph.as_default():
+                self.model = Transformer(Hyperparams, Config)
+                # place variables in the device /cpu:0
+                with tf.device('/cpu:0'):
+                    self.model.instanciate_vars()
         else:
             self.graph = model.graph
             self.model = model
@@ -66,15 +65,17 @@ class Inference:
                 (tf.TensorShape((None, None)), tf.TensorShape([None]))
             )
 
-            self.inputs_parallel = [self.inputs_itr.get_next() for i in range(n_gpus)]
+            # parallel inputs must be taken from the Iterator in the right order
+            #self.inputs_parallel =  multi_get_next_with_dependency(self.inputs_itr, self.n_gpus)
+            self.inputs_parallel = non_even_split(self.inputs_itr.get_next(), self.n_gpus)
             
             # computation graph
             self.beam_size_ph = tf.placeholder(tf.int32, [])
             def _beam_search(inputs):
                 x, x_len = inputs
-                beam_candidates, scores = model.decode(x, x_len, beam_size_ph, return_search_results=True)
+                beam_candidates, scores = self.model.decode(x, x_len, self.beam_size_ph, return_search_results=True)
                 return beam_candidates, scores
-            self.beam_candidates, self.scores = compute_parallel_and_concat(_beam_search, self.inputs_parallel, concat_device='/cpu:0')
+            self.beam_candidates_scores = compute_parallel(_beam_search, self.inputs_parallel) # [n_gpus]
 
              
     def do_beam_search(self, dataset, beam_size, session=None, checkpoint=None):
@@ -84,12 +85,14 @@ class Inference:
                 must be the same as self.graph and all the variables used must be initialized before calling
                 this method.
         Returns:
-            A tuple of two numpy arrays: beam candidates and their scores.
-            The structure is ([batch_size, beam_size, length], [batch_size, beam_size])"""
+            A tuple of two lists: beam candidates and their scores.
+            The structure is ([batch_size, beam_size, length(variable)], [batch_size, beam_size])"""
         
+        logger.info('Beam search decoding.')
         session_to_close = None
         with self.graph.as_default():
             if session is None:
+                logger.info('Create new Session to perform beam search.')
                 checkpoint = checkpoint or self.checkpoint
                 assert checkpoint is not None
 
@@ -99,7 +102,7 @@ class Inference:
                 session_to_close = session
 
                 # initialization
-                sess.run([tf.global_variables_initializer(), tf.tables_initializer()])
+                session.run([tf.global_variables_initializer(), tf.tables_initializer()])
 
                 # restoration of variables
                 saver = tf.train.Saver()
@@ -108,7 +111,9 @@ class Inference:
                 assert session.graph is self.graph
 
             # batch dataset
-            dataset = dataset.padded_batch(Hyperparams.batch_size // self.n_gpus // beam_size,
+            #batch_size = (Hyperparams.batch_size // self.n_gpus) * 4 // (beam_size ** 2)
+            batch_size = (Hyperparams.batch_size) * 4 // (beam_size ** 2)
+            dataset = dataset.padded_batch(batch_size,
                                             ([None], []),
                                             (Config.PAD_ID, 0))
             dataset = dataset.prefetch(self.n_gpus * 2)
@@ -118,21 +123,30 @@ class Inference:
 
             # beam search
             run_results = []
+            start_time = time.time()
+            iter_count = 0
             while True:
                 try:
-                    run_results.append(session.run((self.beam_candidates, self.scores),
+                    run_results.extend(session.run(self.beam_candidates_scores,
                                                    feed_dict={self.beam_size_ph: beam_size}))
                 except tf.errors.OutOfRangeError:
                     break
-            candidates, scores = [np.concatenate(x, axis=0) for x in zip(*run_results)]
+                iter_count += 1
+                sys.stderr.write('{} sec/sample, samples processed: {}   \r'.format(
+                    (time.time() - start_time)/iter_count/batch_size,
+                    iter_count * batch_size))
 
-            session_to_close.close()
+            # candidates: [batch_size, beam_size, length(variable)], scores: [batch_size, beam_size]
+            candidates, scores = [sum([array.tolist() for array in arrays], []) for arrays in zip(*run_results)]
+
+            if session_to_close is not None:
+                session_to_close.close()
         
         return candidates, scores
 
 
     def translate_sentences(self, texts, beam_size=1, return_search_results=False, checkpoint=None, session=None):
-        """translate texts
+        """translate texts. Input format should be tokenized (subword) one and the output's is preprocessed.
         Args:
             texts: list of str. texts must be tokenized into subwords
         Returns:
@@ -149,19 +163,20 @@ class Inference:
         candidates, scores = self.do_beam_search(dataset, beam_size, session, checkpoint)
 
         if return_search_results:
-            batch_size = len(candidates)
-            # flatten and convert to list
-            candidates = candidates.reshape([batch_size * beam_size, -1]).tolist() #[batch*beam, length]
-            candidates = Config.IDs2text(candidates, 'target')
+            nsamples = len(candidates)
+            # flatten 
+            candidates = sum(candidates, []) # [nsamples*beam_size, length(variable)]
+            # convert to string
+            candidates = Config.IDs2text(candidates, 'target') #[nsamples*beam_size]
             # restore shape
             candidates = [candidates[i:i + beam_size] for i in range(0, len(candidates), beam_size)]
 
-            return candidates, scores.tolist()
+            return candidates, scores
         else:
             # take top 1
-            candidates = candidates[:, 0] # [batch_size, length]
+            candidates = [beam[0] for beam in candidates] # [nsamples, length(variable)]
             # convert to string
-            candidates = candidates.tolist()
+            candidates = Config.IDs2text(candidates, 'target') #[nsamples]
 
             return candidates
         
@@ -177,9 +192,15 @@ class Inference:
         # convert to the subword format
         texts = Config.text2tokens(texts, 'source') 
         texts = [' '.join(toks) for toks in texts]
-        self.translate_sentences(texts, *args, **kwargs)
+        return self.translate_sentences(texts, *args, **kwargs)
 
-    def BLEU_evaluation(self, source_file, target_file, beam_size=1, session=None, checkpoint=None, result_file_prefix=None):
+    def translate_raw_texts(self, texts, *args, **kwargs):
+        # preprocess
+        texts = Config.preprocess(texts, 'source')
+
+        return self.translate_preprocessed_texts(texts, *args, **kwargs)
+
+    def BLEU_evaluation(self, source_file, target_file, beam_size=1, session=None, checkpoint=None, result_file_prefix=None, return_samples=False):
         """
         Args:
             source_file, target_file: must be the subword format
@@ -189,20 +210,21 @@ class Inference:
             """
         # read source and target files
         with codecs.open(source_file, 'r') as s_f, codecs.open(target_file, 'r') as t_f:
-            source_texts = [line in s_f]
-            target_texts = [line in t_f] 
+            source_texts = [line.strip() for line in s_f]
+            target_texts = [line.strip() for line in t_f] 
+            assert len(source_texts) == len(target_texts)       
         
         translations = self.translate_sentences(source_texts, beam_size, return_search_results=False, checkpoint=checkpoint, session=session)
 
-        # detokenize targets and translations (which is, 'preprocessed format')
-        detok = Config.tokens2text([line.strip().split() for line in (target_texts + translations)], 'target')
+        # detokenize targets (which is, 'preprocessed format')
+        detok_reference = Config.tokens2text([line.split() for line in target_texts], 'target')
 
-        # tokenize targets and translations to compute BLEU
-        b_tok = Config.text2tokens_BLEU(detok)
+        # tokenize targets and translations to compute BLEU (concatenate the two for faster computation)
+        b_tok = Config.text2tokens_BLEU(translations + detok_reference)
 
         # make translations and references for computing BLEU
-        bleu_translations = detok[:len(detok)/2]
-        bleu_references = [[x] for x in detok[len(detok)/2:]]
+        bleu_translations = b_tok[:len(b_tok)//2]
+        bleu_references = [[x] for x in b_tok[len(b_tok)//2:]]
         
         # compute BLEU
         score = corpus_bleu(bleu_references, bleu_translations)
@@ -212,9 +234,12 @@ class Inference:
             results_file_name, score_file_name = result_file_prefix + '.results', result_file_prefix + '.score'
             with codecs.open(results_file_name, 'w') as r_f, codecs.open(score_file_name, 'w') as s_f:
                 # source \n reference \n translation \n\n
-                r_f.writelines(['{}\n{}\n{}\n\n'.format(s, r[0], t)
+                r_f.writelines(['{}\n{}\n{}\n\n'.format(s, ' '.join(r[0]), ' '.join(t))
                     for s,r,t in zip(source_texts, bleu_references, bleu_translations)])
                 s_f.write(str(score))
 
-        return score
+        if return_samples:
+            return score, source_texts, bleu_translations, bleu_references
+        else:
+            return score
 
