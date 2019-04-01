@@ -227,7 +227,14 @@ class Inference:
         bleu_references = [[x] for x in b_tok[len(b_tok)//2:]]
         
         # compute BLEU
-        score = corpus_bleu(bleu_references, bleu_translations)
+        try:
+            # Custom metric if defined
+            score = Config.compute_bleu(bleu_references, bleu_translations)
+            logger.info('Evaluated with the custom metric.')
+        except:
+            # nltk's corpus_bleu()
+            score = corpus_bleu(bleu_references, bleu_translations)
+            logger.info('Evaluated with the default corpus_bleu of nltk')
 
         # write results into files
         if result_file_prefix is not None:
