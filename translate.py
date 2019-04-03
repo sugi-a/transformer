@@ -185,14 +185,24 @@ class Inference:
         return candidates, scores
 
 
-    def translate_sentences(self, texts, beam_size=1, return_search_results=False, checkpoint=None, session=None, reuse_session=True, init_y_texts=None):
+    def translate_sentences(self, texts, beam_size=1, return_search_results=False, checkpoint=None, session=None, reuse_session=True, init_y_texts=None, return_as_subwords=False):
         """translate texts. Input format should be tokenized (subword) one and the output's is preprocessed.
         Args:
             texts: list of str. texts must be tokenized into subwords before the call of this method
+            init_y_texts: prefix of the translations. The output translations includes them.
         Returns:
-            If return_search_results is True, returns list of candidates (list of list of str) and scores
-            (list of list of float). Each text is in the target language in preprocessed format (not tokenized). 
-            If return_search_results is False, returns the translations with MAP (list of str).
+            If return_search_results is True, returns list of candidates and scores
+            (list of list of float).
+            List of candidates is a array (nested list) whose shape is:
+                If `return_search_results` is True:
+                    [batch_size, beam_size]
+                If `return_search_results` is False (default):
+                    [batch_size] which contains the translations with MAP 
+            and each element is 
+                if `return_as_subwords` is True:
+                    list of subword tokens
+                if `return_as_subwords` is False (default):
+                    str which have been produced by decoding the subword sequence
             """
 
         dataset = dataprocessing.make_dataset_single_from_texts(texts,
@@ -217,7 +227,10 @@ class Inference:
             # flatten 
             candidates = sum(candidates, []) # [nsamples*beam_size, length(variable)]
             # convert to string
-            candidates = Config.IDs2text(candidates, 'target') #[nsamples*beam_size]
+            if return_as_subwords:
+                candidates = Config.IDs2tokens(candidates, Config.TARGET)
+            else:
+                candidates = Config.IDs2text(candidates, Config.TARGET) #[nsamples*beam_size]
             # restore shape
             candidates = [candidates[i:i + beam_size] for i in range(0, len(candidates), beam_size)]
 
@@ -226,7 +239,10 @@ class Inference:
             # take top 1
             candidates = [beam[0] for beam in candidates] # [nsamples, length(variable)]
             # convert to string
-            candidates = Config.IDs2text(candidates, 'target') #[nsamples]
+            if return_as_subwords:
+                candidates = Config.IDs2tokens(candidates, Config.TARGET)
+            else:
+                candidates = Config.IDs2text(candidates, Config.TARGET) #[nsamples]
 
             return candidates
         

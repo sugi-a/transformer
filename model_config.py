@@ -1,6 +1,6 @@
 # Templete of model_config.py
 
-import os
+import os, sys
 import subprocess
 from logging import getLogger, DEBUG, basicConfig
 logger = getLogger(__name__)
@@ -11,7 +11,10 @@ import codecs
 
 import sentencepiece as spm
 
-class Hyperparams:
+sys.path.append('/home/sugi/nlp/transformer')
+import model_config_template
+
+class Hyperparams(model_config_template.Hyperparams):
 
     # training
     batch_size = 128
@@ -32,88 +35,12 @@ class Hyperparams:
     #beam search
     length_penalty_a = 1
 
-"""
-# About data processing and BLEU evaluation
-
-## Data processing for Encoder
-
-To be input into Encoder of Tranformer, the original text (raw corpus text) is converted into sequence of IDs through 2 steps.
-
-1. (almost) Irreversible preprocessing is applied to the original text producing "preprocessed text". Example:
-
-    - MOSES tokenizer for English text
-    - MOSES Trucaser for English text
-    - Lowercasing all words in English text
-    - Kytea for Japanese text (this can be regarded as reversible)
-
-2. Reversible tokenization is applied to the preprocessed data producing tokenized text. Example:
-    
-    - sentencepiece tokenizer
-
-3. Converting tokenized data into IDs. This is done through Tensorflow's data loading pipeline directly connected to Encoder. This phase includes the following.
-
-    - OOV tokens are mapped to Config.UNK_ID
-    - Sequences longer than Hyperparams.max_len are skipped
-    - The EOS ID (Config.EOS_ID) is added at the end of each sequence
-
-In short, the corpus is processed in the following flow.
-Original -> Preprocessed -> Tokenized -> IDs
-
-Note: Currently on-the-fly tokenization methods like subword regularization are not supported. Static vocabulary files are required in the phase 3.
-
-## Data processing of Decoder outputs
-Sequence of IDs output by Decoder is back-converted to a text in the following 2 steps
-
-1. ID to token
-2. Detokenization
-
-Decoder output IDs --(ID to token)--> tokens --(detokenization)--> text
-
-The final output the user gets is in the same sytle as the preprocessed data which is not necessary the natural style of writing. For example, the initial letter of the first word in a English sentence might not be upper case, or Japanese texts can be in the style where words are separated by space.
-
-## BLEU evaluation
-To perform BLEU evaluation, the final output text needs to be tokenized. This tokenization can be different from which is done to create Encoder inputs described above. For example, in general, Japanese texts are tokenized by Kytea for BLEU evaluation.
-In short, the flow of creating list of tokens for BLEU evaluation is as follows.
-
-- For translations: Decoder output IDs --(ID to token)--> tokens text --(detokenization)--> preprocessed text --(tokenization for BLEU)--> tokens for BLEU
-- For references: tokenized text --(detokenization)--> preprocessed text --(tokenization for BLEU)--> tokens for BLEU
-
-# Data files used by the training/test/inference scripts (training.py, inference.py)
-
-- tokenized texts of train/dev data for training
-- preprocessed text of test data for BLEU evaluation
-- vocabulary files for token-to-ID transformation
-
-Note: The original corpus and the first intermediate data files (preprocessed text) aren't used by those scripts.
-
-# Methods of this class (type: source/target)
-
-- preprocess(texts, type): preprocess texts
-- text2tokens(texts, type): tokenization
-- text2IDs(texts, type): tokenization (directly into IDs)
-- IDs2text(seqs, type): detokenization from IDs to text
-- tokens2text(tokens, type): detokenization from tokens to text
-- text2tokens_BLEU(texts, type): tokenization for BLEU evaluation. 
-
-"""
-class Config:
-    # -------------- internal settings of data processing -------------
-    #variables here won't be referred from train/test/prediction scripts
-
-    #sentencepiece setting for this model
-    #make sure the vocabulary size is consistent with Hyperparams.vocab_size
+class Config(model_config_template.Config):
     _SP_model_dir = '/disk/sugi/dataset/ASPEC/preprocessed/sp16k_t1500k_shared'
     _SP_model_prefix_source = _SP_model_dir + '/sp16k'
     _SP_model_prefix_target = _SP_model_prefix_source #vocabulary is shared
     _SP_model_file_source = _SP_model_prefix_source + ".model"
     _SP_model_file_target = _SP_model_prefix_target + ".model"
-
-
-    #Special tokens. Make sure these are consistent with the tokenization model settings.
-    PAD_ID = 0
-    SOS_ID = 1
-    EOS_ID = 2
-    UNK_ID = 3
 
     #Preprocessed dataset
     source_train = '/disk/sugi/dataset/ASPEC/preprocessed/train/train-1500k.en.txt'
@@ -138,127 +65,21 @@ class Config:
     # working directory
     model_name = "model"
     logdir = os.path.dirname(__file__) + "/log"
-    
-    def text2tokens(sents, type):
-        """tokenize sentences into sequences of tokens
-        
-        Args:
-            sents: list of str
-            type: "source" or "target"
-            
-        Returns:
-            list of list of str"""
-        
-        sp = spm.SentencePieceProcessor()
-        model = Config._SP_model_file_source if type == "source" else Config._SP_model_file_target
-        sp.Load(model)
-        return [sp.EncodeAsPieces(sent) for sent in sents]
 
-    def text2IDs(sents, type):
-        """tokenize sentences into sequences of IDs
-        
-        Args:
-            sents: list of str
-            
-        Returns:
-            list of list of int"""
-        #in this model_config.py target=ja
-        sp = spm.SentencePieceProcessor()
-        model = Config._SP_model_file_source if type == "source" else Config._SP_model_file_target
-        sp.Load(model)
-        return [sp.EncodeAsIds(sent) for sent in sents]
+    # Overriding preprocess_(source/target)
+    @classmethod
+    def preprocess_source(cls, text):
+        return subprocess.run(['/disk/sugi/dataset/ASPEC/preprocess.sh', 'en'],
+            input=text.encode(), stdout=subprocess.PIPE).stdout.decode()
 
-    def tokens2text(tokens, type):
-        """detokenize tokens into strings
-        Args:
-            tokens: list of list of str
-            type: "source" or "target"
-        
-        Returns:
-            list of str"""
-        sp = spm.SentencePieceProcessor()
-        model = Config._SP_model_file_source if type == "source" else Config._SP_model_file_target
-        sp.Load(model)
-        return [sp.DecodePieces(tok) for tok in tokens]
+    @classmethod
+    def preprocess_target(cls, text):
+        return subprocess.run(['/disk/sugi/dataset/ASPEC/preprocess.sh', 'ja'],
+            input=text.encode(), stdout=subprocess.PIPE).stdout.decode()
 
-    def IDs2text(seqs, type):
-        """detokenize sequence of IDs into strings
-        Args:
-            source_seqs: list of list of int
-        
-        Returns:
-            list of str"""
-        #in this model_config.py source=en
-        sp = spm.SentencePieceProcessor()
-        model = Config._SP_model_file_source if type == "source" else Config._SP_model_file_target
-        sp.Load(model)
-        return [sp.DecodeIds(seq) for seq in seqs]
-
-
-    def preprocess(texts, type, in_file=None, out_file=None):
-        """Preprocess texts
-        Args:
-            texts: input text. list of str. if in_file is specified this argument is ignored.
-            type: "source" or "target"
-            in_file: You can specify a file as the source instead of list of text. Default is None.
-            out_file: If None, this method returns list of str. If not None, outputs will be written into out_file. Default is None
-        Returns:
-            List of str if out_file is None, otherwise None"""
-        
-        ###############################################
-        # NO NEED TO EDIT IN MOST CASES
-        ###############################################
-        if in_file is not None:
-            with codecs.open(in_file, "r") as f:
-                input_text = f.read()
-        else:
-            input_text = "\n".join(texts) + "\n"
-        ###############################################
-        ###############################################
-
-
-        ###############################################
-        # CHOOSE ONE METHOD TO PRODUCE `output_text`
-        ###############################################
-
-
-        ###############################################
-        # ASPEC Preprocessing Type 1
-        ###############################################
-        t = "en" if type=="source" else "ja"
-        output_text = subprocess.check_output(
-            ["/disk/sugi/dataset/ASPEC/preprocess.sh", t],
-            input=input_text.encode()).decode()
-        ###############################################
-        ###############################################
-        # ASPEC Preprocessing Type 2
-        ###############################################
-#        t = "en" if type=="source" else "ja"
-#        output_text = subprocess.check_output(
-#            ["/disk/sugi/dataset/ASPEC/preprocess2.sh", t],
-#            input=input_text.encode()).decode()
-        ###############################################
-        ###############################################
-
-
-        ###############################################
-        # NO NEED TO EDIT IN MOST CASES
-        ###############################################
-        if out_file is not None:
-            with codecs.open(out_file, "w") as f:
-                f.write(output_text)
-        else:
-            return output_text.strip().split("\n")
-        ###############################################
-        ###############################################
-
-
-    def text2tokens_BLEU(texts):
-        """Tokenize sentences for BLEU evaluation.
-        Japanese texts are tokenized by kytea.
-        Texts in languages which use space as delimiter are tokenized
-        by splitting by space
-        
+    @classmethod
+    def text2tokens_BLEU(cls, texts):
+        """
         Args:
             texts: list of str
             type: "source" or "target"
@@ -266,32 +87,7 @@ class Config:
         Returns:
             list of list of str."""
             
-        ###################################################
-        ## CHOOSE ONE METHOD TO PRODUCE `output` BELOW
-        ###################################################
-            
-
-        ####################################################
-        # Lang: ja
-        # Preprocesing Type: 2 (Not using kytea to tokenize)
-#        kytea_input = ("\n".join(texts) + "\n").encode()
-#        kytea_output = subprocess.check_output(["kytea", "-out", "tok"],
-#                                               input=kytea_input).decode()
-#        output = [line.strip().split() for line in kytea_output.strip().split("\n")]
-        #####################################################
-        #####################################################
-        # Lang: ja
-        # Preprocessing Type: 1 (Using kytea to tokenize)
-        # - Simply split by SPACE
         output = [line.strip().split() for line in texts]
-        #####################################################
-        #####################################################
-        # Lang: en
-        # Preprocessing Type: Tokenization + Truecasing by MOSES toolkit
-        # - Simply split by SPACE
-#        output = [line.strip().split() for line in texts]
-        #####################################################
-
         return output
 
 
