@@ -44,28 +44,24 @@ def train():
     logger.info('Start.')
     print('start')
     
-    parser = argparse.ArgumentParser('train transformer')
-    parser.add_argument('--model_dir', required=True,
-        help="Path of the directory which has model_config.py (required)")
-    parser.add_argument('--n_cpu_cores', default=8, type=int,
-        help="Number of CPU cores this script can use when preprocessing dataset")
-    parser.add_argument('--n_gpus', default=1, type=int,
-        help="Number of GPUs.")
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_dir',
+                        required=True,
+                        help='Path to the directory containing `model_config.py`')
+    parser.add_argument('--n_cpu_cores',
+                        default=8,
+                        type=int,
+                        help='Number of cpu cores used by `tf.data.Dataset.map`')
+    parser.add_argument('--n_gpus',
+                        default=1,
+                        type=int,
+                        help='Number of GPUs available')
+    parser.add_argument('--central_device_data_parallel',
+                        default='None',
+                        help='"None" is converted to `None`. Default is "None"')
     args = parser.parse_args()
-
-#    parser = argparse.ArgumentParser()
-#    parser.add_argument('--model_dir',
-#                        required=True,
-#                        help='Path to the directory containing `model_config.py`')
-#    parser.add_argument('--n_cpu_cores',
-#                        default=8,
-#                        type=int,
-#                        help='Number of cpu cores used by `tf.data.Dataset.map`')
-#    parser.add_argument('--n_gpus',
-#                        default=1,
-#                        type=int,
-#                        help='Number of GPUs available')
-#    args = parser.parse_args()
+    if args.central_device_data_parallel == 'None':
+        args.central_device_data_parallel = None
 
     sys.path.insert(0, args.model_dir)
     import model_config
@@ -118,7 +114,7 @@ def train():
     model = Transformer(Hyperparams, Config, name='transformer')
     
     # place variables on device:CPU
-    with tf.device('/cpu:0'):
+    with tf.device(args.central_device_data_parallel):
         model.instanciate_vars()
 
     # train ops and info
@@ -138,10 +134,15 @@ def train():
 
         return {'loss': loss, 'accuracy': accuracy, 'gradient': grads}, ntokens
 
-    train_info, _ = compute_parallel_and_average(_train_info, train_parallel_inputs, averaging_device='/cpu:0')
+    if args.n_gpus == 1:
+        train_info, _ = _train_info(train_parallel_inputs[0])
+    else:
+        train_info, _ = compute_parallel_and_average(_train_info,
+                                                    train_parallel_inputs,
+                                                    averaging_device=args.central_device_data_parallel)
     
     # updating parameters
-    with tf.device('/cpu:0'):
+    with tf.device(args.central_device_data_parallel):
         grad_vars = [(grad, v) for grad, v in zip(train_info['gradient'], train_vars)]
         train_info['train_op'] = optimizer.apply_gradients(grad_vars, global_step=global_step_var)
 
@@ -152,7 +153,12 @@ def train():
         loss, accuracy, ntokens = get_train_info(y, y_len, logits)
         return {'loss': loss, 'accuracy': accuracy}, ntokens
 
-    dev_info, dev_ntokens = compute_parallel_and_average(_dev_info, dev_parallel_inputs, averaging_device='/cpu:0')
+    if args.n_gpus == 1:
+        dev_info, dev_ntokens = _dev_info(dev_parallel_inputs[0])
+    else:
+        dev_info, dev_ntokens = compute_parallel_and_average(_dev_info,
+                                                            dev_parallel_inputs,
+                                                            averaging_device=args.central_device_data_parallel)
     dev_info_avg = CumulativeAverage(dev_info, dev_ntokens, name='dev_info_avg')
 
     # For BLEU evaluation
@@ -212,13 +218,25 @@ def train():
         # Training epoch loop
         while True:
 
-            # BLEU evaluation
-            logger.info('Computing BLEU score')
-            score = inference.BLEU_evaluation(Config.source_dev_tok,
-                                              Config.target_dev_tok,
-                                              beam_size=1,
-                                              session=sess,
-                                              result_file_prefix=dev_bleu_dir+'/step_{}'.format(global_step))
+            # evaluation
+            if hasattr(Config, 'train_time_metric'):
+                # You can define a function `train_time_metric` in model_config.Config
+                # Args:
+                #   inference: instance of Inference
+                #   session: current session whose graph includes inference and the all parameters have been
+                #   loaded.
+                # Returns:
+                #   score (float)
+                logger.info('Evaluating by the custom metric')
+                Config.train_time_metric(inference, sess)
+            else:
+                logger.info('Custom metric was not found.')
+                logger.info('Computing BLEU score')
+                score = inference.BLEU_evaluation(Config.source_dev_tok,
+                                                  Config.target_dev_tok,
+                                                  beam_size=1,
+                                                  session=sess,
+                                                  result_file_prefix=dev_bleu_dir+'/step_{}'.format(global_step))
             logger.info('Computing BLEU score done. {}'.format(score))
             no_improvement_count = no_improvement_count + 1 if score < max_bleu else 0
             max_bleu = max(score, max_bleu)
