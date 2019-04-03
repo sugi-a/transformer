@@ -355,13 +355,14 @@ class Transformer(tf.layers.Layer):
         dec_outputs = self.decoder(dec_inputs, enc_outputs, dec_self_attn_bias, dec_ctx_attn_bias, training=training)
         return dec_outputs
 
-    def decode(self, x, x_len, beam_size=8, return_search_results=False):
+    def decode(self, x, x_len, beam_size=8, return_search_results=False, init_y=None, init_y_len=None):
         """Given inputs x, this method produces translation candidates by beam search
         and return the all results if `return_search_results` is True, or the sequence with the MAP otherwise.
         Args:
             x: Source sequence. tf.int32 Tensor of shape [batch, length]
             x_len: lengths of x. tf.int32, [batch]
             return_search_results: Boolean indicating whether to return the whole results or the MAP only.
+            init_target_seq: target-side prefix sequence
         Returns:
             If `return_search_results` is True, a tuple of Tensor, ([batch, beam_size, length],
             [batch, beam_size]) is returned. Otherwise a Tensor [batch, length] is returned."""
@@ -386,10 +387,30 @@ class Transformer(tf.layers.Layer):
                                          'v': tf.zeros([batch_size, 0, self.hparams.attention_size])}
 
         with tf.name_scope('max_length'):
-            maxlen = tf.shape(x)[1] * 2 + 5 # hard coding
+            maxlen = tf.math.maximum(256, tf.shape(x)[1] * 2 + 5) # hard coding
 
         with tf.name_scope('dec_self_attn_bias'):
             dec_self_attn_bias = make_attention_bias_triangle(maxlen)
+
+        with tf.name_scope('define_init_sequence'):
+            with tf.name_scope('default_prefix'):
+                default_prefix = tf.fill([batch_size, 1], self.config.SOS_ID)
+                default_len = tf.ones([batch_size], dtype=tf.int32)
+            if init_y is not None:
+                assert init_y_len is not None
+                # make the prefix sequence
+                # if init_target_seq's size is 0, use simple SOS initialization
+                with tf.name_scope('custom_prefix'):
+                    # Add SOS to the beginning and remove the last token
+                    custom_prefix = tf.pad(init_y, [[0,0], [1,0]], constant_values=self.config.SOS_ID)[:, :-1]
+
+                no_context = tf.equal(tf.size(init_y), 0)
+                init_dec_inputs = tf.cond(no_context, lambda: default_prefix, lambda: custom_prefix)
+                init_dec_inputs_len = tf.cond(no_context, lambda: default_len, lambda: init_y_len)
+            else:
+                init_dec_inputs = default_prefix
+                init_dec_inputs_len = default_len
+
 
         def get_logits_fn(dec_inputs, cache):
             cache_l0_v = cache['layer_0']['v']
@@ -414,11 +435,12 @@ class Transformer(tf.layers.Layer):
 
         beam_candidates, scores = beam_search_decode(get_logits_fn,
                                                      cache,
+                                                     init_dec_inputs,
+                                                     init_dec_inputs_len,
                                                      beam_size,
                                                      maxlen,
                                                      self.config.EOS_ID,
                                                      self.config.PAD_ID,
-                                                     self.config.SOS_ID,
                                                      self.hparams.length_penalty_a)
 
         if return_search_results:
@@ -429,7 +451,7 @@ class Transformer(tf.layers.Layer):
             return top_seqs
 
 
-def beam_search_decode(get_logits_fn, init_cache, beam_size, maxlen, eos_id, pad_id=0, sos_id=None, alpha=1, init_dec_inputs=None):
+def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inputs_len, beam_size, maxlen, eos_id, pad_id=0, alpha=1):
     """
     Args:
         get_logits_fn: produces logits given decoder inputs and cached inputs
@@ -453,16 +475,15 @@ def beam_search_decode(get_logits_fn, init_cache, beam_size, maxlen, eos_id, pad
 
 
     loop variables
-        cache: each element has a shape of [batch_size, b, ...]
-        generated_seq: [batch_size, b, None] tf.int32
-        log probability of sequence: [batch_size, b] tf.float32
-        has_eos: [batch_size, b] tf.bool
-        b: 1 in the first iteration, beam_size otherwise
-
+        cache: each element has a shape of [batch_size, batch_size, ...]
+        generated_seq: [batch_size, batch_size, None] tf.int32
+        log probability of sequence: [batch_size, batch_size] tf.float32
+        has_eos: [batch_size, beam_size] tf.bool
 
         cache, generated_seq, seq_log_prob, has_eos, score
 
         """
+    NEG_INF = -1e9
     
     with tf.name_scope('batch_size'):
         batch_size = tf.shape(nest.flatten(init_cache)[0])[0]
@@ -489,8 +510,6 @@ def beam_search_decode(get_logits_fn, init_cache, beam_size, maxlen, eos_id, pad
 
     def fork(batch):
         # [batch_size, b, ...] -> [batch_size, b*beam_size, ...]
-        #target_shape = tf.unstack(tf.shape(batch), axis=0) # initial shape: [batch_size, b, ...]
-        #target_shape[1] = -1
         shape_before = tf.shape(batch)
         target_shape = tf.concat([shape_before[:1], shape_before[1:2] * beam_size, shape_before[2:]], axis=0)
         batch = tf.expand_dims(batch, axis=2) # [batch_size, b, 1, ...]
@@ -507,21 +526,20 @@ def beam_search_decode(get_logits_fn, init_cache, beam_size, maxlen, eos_id, pad
     def body_fn(loop_vars):
 
         with tf.name_scope('loop_body'):
-            # beam duplication number (1 or beam_size)
-            b = tf.shape(loop_vars['generated_seq'], name='n_parent_forks')[1]
+            # The position of the token predicted in this iteration. Starts from 0
+            predicting_pos = tf.shape(loop_vars['generated_seq'])[2] + dec_inputs_prefix_len
 
-            dec_inputs = tf.cond(tf.equal(0, tf.shape(loop_vars['generated_seq'])[2]),
-                                  lambda: init_dec_inputs,
-                                  lambda: loop_vars['generated_seq'][:, :, -1:], name='dec_inputs')
             # flatten cache and dec_inputs
             with tf.name_scope('flatten_inputs'):
-                flat_cache = nest.map_structure(flatten, loop_vars['cache'])
-                flat_dec_inputs = flatten(dec_inputs)
+                flat_cache = nest.map_structure(flatten, loop_vars['cache']) # [batch_size*beam_size, ...]
+                flat_dec_inputs = flatten(loop_vars['dec_inputs']) # [batch_size*beam_size, length]
 
             # get the next logits
-            # flat_cache is updated there
+            # flat_cache is updated in `get_logits_fn`
             with tf.name_scope('get_logits_and_update_layer_cache'):
-                logits = get_logits_fn(flat_dec_inputs, flat_cache) # [batch_size*b, 1, vocab_size]
+                # Note: the outputs' length can be greater than 1 because of the initial target-side context
+                # so take THE LAST LOGIT
+                logits = get_logits_fn(flat_dec_inputs, flat_cache)[:,-1:] # [batch_size*b, 1, vocab_size]
 
             # restore shape of cache and update
             with tf.name_scope('update_and_restore_structure_of_cache'):
@@ -529,44 +547,73 @@ def beam_search_decode(get_logits_fn, init_cache, beam_size, maxlen, eos_id, pad
 
             with tf.name_scope('preliminary_top_ids_and_log_probs'):
                 # get the top k=beam_size for each sequence
-                top_logits, ids = tf.math.top_k(logits, beam_size, False, name='preliminary_tops') # [batch_size*b, 1, beam_size]
+                # [batch_size*b, 1, beam_size]
+                top_logits, ids = tf.math.top_k(logits, beam_size, False, name='preliminary_tops') 
 
                 # get the log probabilities
                 with tf.name_scope('logits_to_log_prob'):
-                    log_prob = top_logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True) #[batch_size*b, 1, beam_size] 
+                    #[batch_size*b, 1, beam_size] 
+                    log_prob = top_logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True) 
                 # restore shape of log_prob and ids into forked style (parent nodes -> child nodes)
                 with tf.name_scope('restore_shape'):
-                    log_prob = tf.reshape(log_prob, [batch_size, b * beam_size]) # [batch_size, b*beam_size]
-                    ids = tf.reshape(ids, [batch_size, b * beam_size, 1]) # [batch_size, b*beam_size, 1]
+                    log_prob = tf.reshape(log_prob, [batch_size, beam_size ** 2]) # [batch_size, beam_size^2]
+                    ids = tf.reshape(ids, [batch_size, beam_size ** 2, 1]) # [batch_size, beam_size^2, 1]
 
-            # fork tensors. tile and reshape tensors into the shape [batch_size, b*beam_size, ...]
+            # fork tensors. tile and reshape tensors into the shape [batch_size, beam_size^2, ...]
+            # except 'dec_inputs'
             with tf.name_scope('fork_state_vars'):
-                forked_vars = nest.map_structure(fork, loop_vars)
+                forked_vars = nest.map_structure(fork, {k:v for k,v in loop_vars.items() if k != 'dec_inputs'})
 
             # calculate updated log probabilities and sequences and scores
             with tf.name_scope('update_sequence'):
+                # [batch_size, beam_size**2, 1]
+                is_init_seq = tf.expand_dims(tf.less(predicting_pos, forked_init_dec_inputs_len - 1), axis=-1)
+
+                # the (predicting_pos + 1)-th tokens
+                # Ensure that its shape is [batch_size, beam_size^2, 1]
+                forked_given_next_tokens = forked_init_dec_inputs[:, :, predicting_pos + 1:predicting_pos + 2]
+                forked_given_next_tokens = tf.concat([forked_given_next_tokens,
+                    tf.zeros([batch_size, beam_size**2, 1 - tf.shape(forked_given_next_tokens)[2]],
+                             dtype=tf.int32)],
+                    axis=2)
+                # [batch_size, beam_size**2, 1]
+                is_ended = tf.expand_dims(forked_vars['has_eos'], axis=-1)
                 forked_vars['generated_seq'] = tf.concat([
                     forked_vars['generated_seq'],
-                    tf.where(tf.expand_dims(forked_vars['has_eos'], axis=-1),
-                             tf.ones_like(ids, dtype=tf.int32) * pad_id,
-                             ids)
-                    ], axis=2, name='updated_sequence')
+                    tf.where(
+                        is_init_seq,
+                        forked_given_next_tokens,
+                        tf.where(
+                            is_ended,
+                            tf.ones_like(ids, dtype=tf.int32) * pad_id,
+                            ids)
+                    )
+                ], axis=2, name='updated_sequence')
+                    
 
             with tf.name_scope('update_log_prob'):
-                forked_vars['seq_log_prob'] = tf.where(forked_vars['has_eos'],
-                                                       forked_vars['seq_log_prob'],
-                                                       forked_vars['seq_log_prob'] + log_prob, name='new_log_prob')
+                # seq_log_prob: [batch_size, beam_size^2]
+                forked_vars['seq_log_prob'] = tf.where(
+                    forked_vars['has_eos'],
+                    forked_vars['seq_log_prob'] + table_of_log_prob_to_be_added_to_eos_beam,
+                    forked_vars['seq_log_prob'] + log_prob, name='new_log_prob')
 
             with tf.name_scope('update_scores'):
                 forked_vars['score'] = tf.where(forked_vars['has_eos'],
-                                                forked_vars['score'],
+                                                forked_vars['score'] + table_of_log_prob_to_be_added_to_eos_beam,
                                                 forked_vars['seq_log_prob'] / length_penalty(tf.shape(forked_vars['generated_seq'])[2], alpha), name='new_scores')
 
             # update has_eos
             with tf.name_scope('update_eos'):
-                forked_vars['has_eos'] = tf.math.logical_or(forked_vars['has_eos'],
-                                                            tf.equal(eos_id, tf.reshape(ids, [batch_size, -1])),
-                                                            name='new_has_eos')
+                is_init_seq = tf.less(predicting_pos, forked_init_dec_inputs_len - 1)
+                forked_vars['has_eos'] = tf.where(
+                    is_init_seq,
+                    tf.fill([batch_size, beam_size**2], tf.constant(False, dtype=tf.bool)),
+                    tf.math.logical_or(forked_vars['has_eos'],
+                                        tf.equal(eos_id, tf.reshape(ids, [batch_size, beam_size**2])),
+                                        name='new_has_eos')
+                )
+                
 
             # take top k=beam_size
             with tf.name_scope('choose_top_candidates'):
@@ -574,21 +621,49 @@ def beam_search_decode(get_logits_fn, init_cache, beam_size, maxlen, eos_id, pad
 
                 new_vars = nest.map_structure(lambda x:tf.batch_gather(x, top_indices), forked_vars)
 
+            # update dec_inputs
+            with tf.name_scope('update_dec_inputs'):
+                # [batch_size, beam_size, 1]
+                new_vars['dec_inputs'] = new_vars['generated_seq'][:, :, -1:]
+
         return new_vars
 
     # initial decoder inputs
-    if init_dec_inputs is None:
-        with tf.name_scope('init_dec_inputs'):
-            init_dec_inputs = tf.ones([batch_size, 1, 1], dtype=tf.int32) * sos_id
+    with tf.name_scope('init_dec_inputs'):
+        # reshape from [batch_size, length] to [batch_size, 1, length]
+        # and tile into [batch_size, beam_size, length]
+        init_dec_inputs = tf.tile(tf.expand_dims(init_dec_inputs, axis=1), [1, beam_size, 1])
+        # reshape from [batch_size] to [batch_size, 1] and tile into [batch_size, beam_size]
+        init_dec_inputs_len = tf.tile(tf.expand_dims(init_dec_inputs_len, axis=1), [1, beam_size])
+        with tf.name_scope('forked'):
+            forked_init_dec_inputs = fork(init_dec_inputs) # [batch_size, beam_size**2, length]
+            forked_init_dec_inputs_len = fork(init_dec_inputs_len) # [batch_size, beam_size**2]
 
-    #cache, generated_seq, seq_log_prob, has_eos, score
+    with tf.name_scope('dec_inputs_prefix'):
+        dec_inputs_prefix_len = tf.math.reduce_min(init_dec_inputs_len)
+        dec_inputs_prefix = init_dec_inputs[:, :, :dec_inputs_prefix_len] # [batch_size, beam_size, prefix_len]
+
+    with tf.name_scope('table_of_log_prob_to_be_added_to_eos_beams'):
+        # [batch_size, beam_size^2]
+        table_of_log_prob_to_be_added_to_eos_beam = tf.tile(
+            tf.concat([tf.zeros([batch_size, 1]), tf.fill([batch_size, beam_size - 1], NEG_INF)], axis=1),
+            [1, beam_size],
+            name='table_of_log_prob_to_be_added_to_eos_beams')
+
+    #cache, generated_seq, seq_log_prob, has_eos, score, dec_inputs
     with tf.name_scope('init_loop_vars'):
         init_loop_vars = {
-            'cache': nest.map_structure(lambda x: tf.expand_dims(x, 1), init_cache),
-            'generated_seq': tf.zeros([batch_size, 1, 0], dtype=tf.int32),
-            'seq_log_prob': tf.zeros([batch_size, 1]),
-            'has_eos': tf.zeros([batch_size, 1], dtype=tf.bool),
-            'score': tf.zeros([batch_size, 1])
+            # Reshape and tile each element in cache from [batch_size, ...] to [batch_size, beam_size, ...]
+            'cache': nest.map_structure(lambda x: fork(tf.expand_dims(x, 1)), init_cache),
+            'generated_seq': tf.zeros([batch_size, beam_size, 0], dtype=tf.int32),
+            # Only one beam for a sample has log probability of 0 and the rest are negative infinity
+            'seq_log_prob': tf.concat(
+                [tf.zeros([batch_size, 1]), tf.fill([batch_size, beam_size - 1], NEG_INF)], axis=1),
+            'has_eos': tf.zeros([batch_size, beam_size], dtype=tf.bool),
+            # Only one beam for a sample has log probability of 0 and the rest are negative infinity
+            'score': tf.concat(
+                [tf.zeros([batch_size, 1]), tf.fill([batch_size, beam_size - 1], NEG_INF)], axis=1),
+            'dec_inputs': dec_inputs_prefix
         }
 
     # shape invariants
@@ -598,7 +673,8 @@ def beam_search_decode(get_logits_fn, init_cache, beam_size, maxlen, eos_id, pad
             'generated_seq': tf.TensorShape([None, None, None]),
             'seq_log_prob': tf.TensorShape([None, None]),
             'has_eos': tf.TensorShape([None, None]),
-            'score': tf.TensorShape([None, None])
+            'score': tf.TensorShape([None, None]),
+            'dec_inputs': tf.TensorShape([None, None, None])
         }
 
     with tf.name_scope('while_loop'):
@@ -633,5 +709,10 @@ def beam_search_decode(get_logits_fn, init_cache, beam_size, maxlen, eos_id, pad
         with tf.name_scope('final_sort'):
             score, indices = tf.math.top_k(finish_state['score'], beam_size, sorted=True)
             seq = tf.batch_gather(finish_state['generated_seq'], indices)
+
+        # concat with the prefix and remove the first token (usually <SOS>)
+        # [batch_size, beam_size, length]
+        with tf.name_scope('concat_prefix'):
+            seq = tf.concat([dec_inputs_prefix, seq], axis=-1)[:, :, 1:]
 
     return seq, score

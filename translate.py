@@ -41,6 +41,8 @@ class Inference:
         """
         self.n_cpu_cores = n_cpu_cores
         self.n_gpus = n_gpus
+
+        self.session = None
         
         if model is None:
             if graph is None:
@@ -49,9 +51,14 @@ class Inference:
 
             with self.graph.as_default():
                 self.model = Transformer(Hyperparams, Config)
-                # place variables in the device /cpu:0
-                with tf.device('/cpu:0'):
-                    self.model.instanciate_vars()
+                if self.n_gpus == 1:
+                    # Single GPU
+                    with tf.device(None):
+                        self.model.instanciate_vars()
+                else:
+                    # place variables in the device /cpu:0
+                    with tf.device('/cpu:0'):
+                        self.model.instanciate_vars()
         else:
             self.graph = model.graph
             self.model = model
@@ -61,27 +68,39 @@ class Inference:
         with self.graph.as_default():
             # input Iterator
             self.inputs_itr = tf.data.Iterator.from_structure(
-                (tf.int32, tf.int32),
-                (tf.TensorShape((None, None)), tf.TensorShape([None]))
+                ((tf.int32, tf.int32), (tf.int32, tf.int32)),
+                ((tf.TensorShape([None, None]), tf.TensorShape([None])),
+                (tf.TensorShape([None, None]), tf.TensorShape([None])))
             )
 
-            # parallel inputs must be taken from the Iterator in the right order
-            #self.inputs_parallel =  multi_get_next_with_dependency(self.inputs_itr, self.n_gpus)
-            self.inputs_parallel = non_even_split(self.inputs_itr.get_next(), self.n_gpus)
+
+            if self.n_gpus == 1:
+                # Single GPU
+                self.inputs_parallel = [self.inputs_itr.get_next()]
+            else:
+                # parallel inputs must be taken from the Iterator in the right order
+                self.inputs_parallel = non_even_split(self.inputs_itr.get_next(), self.n_gpus)
             
             # computation graph
             self.beam_size_ph = tf.placeholder(tf.int32, [])
             def _beam_search(inputs):
-                x, x_len = inputs
-                beam_candidates, scores = self.model.decode(x, x_len, self.beam_size_ph, return_search_results=True)
+                (x, x_len), (init_y, init_y_len) = inputs
+                beam_candidates, scores = self.model.decode(
+                    x,
+                    x_len,
+                    self.beam_size_ph,
+                    return_search_results=True,
+                    init_y=init_y,
+                    init_y_len=init_y_len)
                 return beam_candidates, scores
             self.beam_candidates_scores = compute_parallel(_beam_search, self.inputs_parallel) # [n_gpus]
 
              
-    def do_beam_search(self, dataset, beam_size, session=None, checkpoint=None):
+    def do_beam_search(self, dataset, beam_size, session=None, checkpoint=None, reuse_session=True, init_y_dataset=None):
         """conduct beam search producing results as numpy arrays.
         Args:
-            session: `tf.Session` to be used. If `None`, a new one is created. If specified, its `graph`
+            session: `tf.Session` to be used. If `None`, a new one is created and reused.
+                If specified, its `graph`
                 must be the same as self.graph and all the variables used must be initialized before calling
                 this method.
         Returns:
@@ -92,30 +111,51 @@ class Inference:
         session_to_close = None
         with self.graph.as_default():
             if session is None:
-                logger.info('Create new Session to perform beam search.')
-                checkpoint = checkpoint or self.checkpoint
-                assert checkpoint is not None
+                if reuse_session and self.session:
+                    logger.info('Reusing session')
+                    session = self.session
+                else:
+                    logger.info('Create new Session to perform beam search.')
+                    checkpoint = checkpoint or self.checkpoint
+                    assert checkpoint is not None
 
-                session_config = tf.ConfigProto()
-                session_config.allow_soft_placement = True
-                session = tf.Session(config=session_config)
-                session_to_close = session
+                    session_config = tf.ConfigProto()
+                    session_config.allow_soft_placement = True
+                    session = tf.Session(config=session_config)
 
-                # initialization
-                session.run([tf.global_variables_initializer(), tf.tables_initializer()])
+                    if reuse_session:
+                        try:
+                            self.session.close()
+                        except:
+                            pass
+                        self.session = session
+                    else:
+                        session_to_close = session
 
-                # restoration of variables
-                saver = tf.train.Saver()
-                saver.restore(session, checkpoint)
+                    # initialization
+                    session.run([tf.global_variables_initializer(), tf.tables_initializer()])
+
+                    # restoration of variables
+                    saver = tf.train.Saver()
+                    saver.restore(session, checkpoint)
             else:
                 assert session.graph is self.graph
 
+            # dataset of the initial translations given
+            if init_y_dataset is None:
+                # Create init_y_dataset (empty sequences) if not specified
+                init_y_dataset = tf.data.Dataset.from_tensors((tf.zeros([0], dtype=tf.int32), 0))
+                init_y_dataset = init_y_dataset.repeat()
+
+            # merge the main inputs and the initial translation datasets
+            dataset = tf.data.Dataset.zip((dataset, init_y_dataset))
+
             # batch dataset
             #batch_size = (Hyperparams.batch_size // self.n_gpus) * 4 // (beam_size ** 2)
-            batch_size = (Hyperparams.batch_size) * 4 // (beam_size ** 2)
+            batch_size = (Hyperparams.batch_size) * 2 // (beam_size) + 1
             dataset = dataset.padded_batch(batch_size,
-                                            ([None], []),
-                                            (Config.PAD_ID, 0))
+                                            (([None], []), ([None], [])),
+                                            ((Config.PAD_ID, 0), (Config.PAD_ID, 0)))
             dataset = dataset.prefetch(self.n_gpus * 2)
 
             # initialization of the input Iterator
@@ -145,10 +185,10 @@ class Inference:
         return candidates, scores
 
 
-    def translate_sentences(self, texts, beam_size=1, return_search_results=False, checkpoint=None, session=None):
+    def translate_sentences(self, texts, beam_size=1, return_search_results=False, checkpoint=None, session=None, reuse_session=True, init_y_texts=None):
         """translate texts. Input format should be tokenized (subword) one and the output's is preprocessed.
         Args:
-            texts: list of str. texts must be tokenized into subwords
+            texts: list of str. texts must be tokenized into subwords before the call of this method
         Returns:
             If return_search_results is True, returns list of candidates (list of list of str) and scores
             (list of list of float). Each text is in the target language in preprocessed format (not tokenized). 
@@ -160,7 +200,17 @@ class Inference:
                                                                 Config.UNK_ID,
                                                                 Config.EOS_ID,
                                                                 self.n_cpu_cores)
-        candidates, scores = self.do_beam_search(dataset, beam_size, session, checkpoint)
+        if init_y_texts is not None:
+            assert len(texts) == len(init_y_texts)
+            init_y_dataset = dataprocessing.make_dataset_single_from_texts(init_y_texts,
+                                                                Config.vocab_target,
+                                                                Config.UNK_ID,
+                                                                Config.EOS_ID,
+                                                                self.n_cpu_cores)
+        else:
+            init_y_dataset = None
+
+        candidates, scores = self.do_beam_search(dataset, beam_size, session, checkpoint, reuse_session, init_y_dataset)
 
         if return_search_results:
             nsamples = len(candidates)
@@ -180,7 +230,7 @@ class Inference:
 
             return candidates
         
-    def translate_preprocessed_texts(self, texts, *args, **kwargs):
+    def translate_preprocessed_texts(self, texts, *args, init_y_texts=None, **kwargs):
         """translate texts
         Args:
             texts: list of str. texts must be in the preprocessed format (not tokenized by sentencepiece)
@@ -192,13 +242,22 @@ class Inference:
         # convert to the subword format
         texts = Config.text2tokens(texts, 'source') 
         texts = [' '.join(toks) for toks in texts]
-        return self.translate_sentences(texts, *args, **kwargs)
 
-    def translate_raw_texts(self, texts, *args, **kwargs):
+        # context
+        if init_y_texts is not None:
+            init_y_texts = Config.text2tokens(init_y_texts, 'target') 
+            init_y_texts = [' '.join(toks) for toks in init_y_texts]
+
+        return self.translate_sentences(texts, *args, init_y_texts=init_y_texts, **kwargs)
+
+    def translate_raw_texts(self, texts, *args, init_y_texts=None, **kwargs):
         # preprocess
         texts = Config.preprocess(texts, 'source')
 
-        return self.translate_preprocessed_texts(texts, *args, **kwargs)
+        if init_y_texts is not None:
+            init_y_texts = Config.preprocess(init_y_texts, 'target')
+
+        return self.translate_preprocessed_texts(texts, *args, init_y_texts=init_y_texts, **kwargs)
 
     def BLEU_evaluation(self, source_file, target_file, beam_size=1, session=None, checkpoint=None, result_file_prefix=None, return_samples=False):
         """
