@@ -228,7 +228,7 @@ def train():
                 # Returns:
                 #   score (float)
                 logger.info('Evaluating by the custom metric')
-                Config.train_time_metric(inference, sess)
+                Config.train_time_metric(inference, sess, global_step)
             else:
                 logger.info('Custom metric was not found.')
                 logger.info('Computing BLEU score')
