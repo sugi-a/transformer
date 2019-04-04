@@ -138,7 +138,9 @@ class Multihead_attention(tf.layers.Layer):
         weight = tf.matmul(q, k, transpose_b=True) # [batch, nheads, length_q, length_k]
         weight = weight / (head_size ** 0.5)
 
-        weight = weight + bias
+        with tf.name_scope('add_bias'):
+            weight = weight + bias
+
         weight = tf.nn.softmax(weight, name='attention_weight')
 
         weight = tf.layers.dropout(weight, self.dropout_rate, training=training)
@@ -387,7 +389,7 @@ class Transformer(tf.layers.Layer):
                                          'v': tf.zeros([batch_size, 0, self.hparams.attention_size])}
 
         with tf.name_scope('max_length'):
-            maxlen = tf.math.maximum(256, tf.shape(x)[1] * 2 + 5) # hard coding
+            maxlen = tf.math.maximum(512, tf.shape(x)[1] * 2 + 5) # hard coding
 
         with tf.name_scope('dec_self_attn_bias'):
             dec_self_attn_bias = make_attention_bias_triangle(maxlen)
@@ -424,6 +426,7 @@ class Transformer(tf.layers.Layer):
             RMatrix[start:end, 0:end]
 
             """
+            # DEBUG
             _self_attn_bias = dec_self_attn_bias[:, :, seq_start:seq_end, :seq_end]
             outputs = self.decoder(dec_inputs,
                                    cache['enc_outputs'],
@@ -432,6 +435,18 @@ class Transformer(tf.layers.Layer):
                                    training=False,
                                    cache=cache)
             return outputs
+
+        # Check if the input is empty.
+        # Due to the data parallel execution, this graph may recieve an batch with size 0
+        # which leads to undefined behavior and errors in the while_loop.
+        with tf.name_scope('check_empty_batch'):
+            input_is_empty = tf.equal(batch_size, 0)
+            def size1_dummy(batch):
+                return tf.ones(tf.concat([[1], tf.shape(batch)[1:]], axis=0), dtype=batch.dtype)
+            cache, init_dec_inputs, init_dec_inputs_len = tf.cond(input_is_empty,
+                lambda: nest.map_structure(size1_dummy, [cache, init_dec_inputs, init_dec_inputs_len]),
+                lambda: [cache, init_dec_inputs, init_dec_inputs_len])
+            maxlen = tf.cond(input_is_empty, lambda: 3, lambda: maxlen)
 
         beam_candidates, scores = beam_search_decode(get_logits_fn,
                                                      cache,
@@ -442,6 +457,10 @@ class Transformer(tf.layers.Layer):
                                                      self.config.EOS_ID,
                                                      self.config.PAD_ID,
                                                      self.hparams.length_penalty_a)
+
+        with tf.name_scope('post_check_empty_batch'):
+            beam_candidates = tf.cond(input_is_empty, lambda: beam_candidates[:0], lambda: beam_candidates)
+            scores = tf.cond(input_is_empty, lambda: scores[:0], lambda: scores)
 
         if return_search_results:
             return beam_candidates, scores
@@ -505,7 +524,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
 
     def pack(flat_batch):
         # [batch_size*b, ...] -> [batch_size, b, ...]
-        shape_after = tf.concat([[batch_size, -1], tf.shape(flat_batch)[1:]], axis=0)
+        shape_after = tf.concat([[batch_size, beam_size], tf.shape(flat_batch)[1:]], axis=0)
         return tf.reshape(flat_batch, shape_after)
 
     def fork(batch):
@@ -521,13 +540,15 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
         return batch
 
     def cond_fn(loop_vars):
-        return tf.logical_not(tf.reduce_all(loop_vars['has_eos']), name='loop_condition')
+        some_not_ended = tf.logical_not(tf.reduce_all(loop_vars['has_eos']), name='loop_condition')
+        shorter_than_maxlen = tf.less(tf.shape(loop_vars['generated_seq'])[2] + dec_inputs_prefix_len - 1, maxlen)
+        return tf.logical_and(some_not_ended, shorter_than_maxlen)
 
     def body_fn(loop_vars):
 
         with tf.name_scope('loop_body'):
             # The position of the token predicted in this iteration. Starts from 0
-            predicting_pos = tf.shape(loop_vars['generated_seq'])[2] + dec_inputs_prefix_len
+            predicting_pos = tf.shape(loop_vars['generated_seq'])[2] + dec_inputs_prefix_len - 1
 
             # flatten cache and dec_inputs
             with tf.name_scope('flatten_inputs'):
@@ -628,6 +649,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
 
         return new_vars
 
+
     # initial decoder inputs
     with tf.name_scope('init_dec_inputs'):
         # reshape from [batch_size, length] to [batch_size, 1, length]
@@ -666,6 +688,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
             'dec_inputs': dec_inputs_prefix
         }
 
+
     # shape invariants
     with tf.name_scope('shape_invariants'):
         shape_invariants = {
@@ -687,6 +710,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
             maximum_iterations=maxlen,
             parallel_iterations=1
             )
+
 
     with tf.name_scope('post_processing'):
         # non-finished sequences get very low score
