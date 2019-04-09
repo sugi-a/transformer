@@ -185,7 +185,7 @@ class Inference:
         return candidates, scores
 
 
-    def translate_sentences(self, texts, beam_size=1, return_search_results=False, checkpoint=None, session=None, reuse_session=True, init_y_texts=None, return_as_subwords=False):
+    def translate_sentences(self, texts, beam_size=1, return_search_results=False, checkpoint=None, session=None, reuse_session=True, init_y_texts=None, return_in_subwords=False):
         """translate texts. Input format should be tokenized (subword) one and the output's is preprocessed.
         Args:
             texts: list of str. texts must be tokenized into subwords before the call of this method
@@ -199,9 +199,9 @@ class Inference:
                 If `return_search_results` is False (default):
                     [batch_size] which contains the translations with MAP 
             and each element is 
-                if `return_as_subwords` is True:
+                if `return_in_subwords` is True:
                     list of subword tokens
-                if `return_as_subwords` is False (default):
+                if `return_in_subwords` is False (default):
                     str which have been produced by decoding the subword sequence
             """
 
@@ -227,7 +227,7 @@ class Inference:
             # flatten 
             candidates = sum(candidates, []) # [nsamples*beam_size, length(variable)]
             # convert to string
-            if return_as_subwords:
+            if return_in_subwords:
                 candidates = Config.IDs2tokens(candidates, Config.TARGET)
             else:
                 candidates = Config.IDs2text(candidates, Config.TARGET) #[nsamples*beam_size]
@@ -239,7 +239,7 @@ class Inference:
             # take top 1
             candidates = [beam[0] for beam in candidates] # [nsamples, length(variable)]
             # convert to string
-            if return_as_subwords:
+            if return_in_subwords:
                 candidates = Config.IDs2tokens(candidates, Config.TARGET)
             else:
                 candidates = Config.IDs2text(candidates, Config.TARGET) #[nsamples]
@@ -313,15 +313,22 @@ class Inference:
 
         # write results into files
         if result_file_prefix is not None:
-            results_file_name, score_file_name = result_file_prefix + '.results', result_file_prefix + '.score'
-            with codecs.open(results_file_name, 'w') as r_f, codecs.open(score_file_name, 'w') as s_f:
-                # source \n reference \n translation \n\n
-                r_f.writelines(['{}\n{}\n{}\n\n'.format(s, ' '.join(r[0]), ' '.join(t))
-                    for s,r,t in zip(source_texts, bleu_references, bleu_translations)])
-                s_f.write(str(score))
+            write_BLEU_results_to_file(result_file_prefix, source_texts, score, bleu_references, bleu_translations)
 
         if return_samples:
             return score, source_texts, bleu_translations, bleu_references
         else:
             return score
+
+def write_BLEU_results_to_file(prefix, sources, score, references, translations):
+    """
+    references and translations are those you give to nltk's corpus_bleu()
+    assert len(sources) == len(references) == len(translations)
+        """
+    results_file_name, score_file_name = prefix + '.results', prefix + '.score'
+    with codecs.open(results_file_name, 'w') as r_f, codecs.open(score_file_name, 'w') as s_f:
+        # source \n reference \n translation \n\n
+        r_f.writelines(['{}\n{}\n{}\n\n'.format(s, ' '.join(r[0]), ' '.join(t))
+            for s,r,t in zip(sources, references, translations)])
+        s_f.write(str(score) + '\n')
 

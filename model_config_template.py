@@ -278,13 +278,17 @@ class Config:
     @classmethod
     def IDs2tokens(cls, seqs, type):
         """Convert id sequences into subword sequences
+        NOTE: The output of this method is equivalent to text2tokens(IDs2text(seqs, type))
+        So, all the control symbols (SOS, EOS, PAD etc) are ignored.
+
         Args:
             seqs: list of list of int
         Returns:
-            list of list of str"""
+            list of list of str.
+            """
         if not hasattr(cls, '_sp_source'): cls._load_sp()
         sp = cls._sp_source if type==cls.SOURCE else cls._sp_target
-        return [[sp.id_to_piece(id) for id in seq] for seq in seqs]
+        return [[sp.id_to_piece(id) for id in seq if not sp.is_control(id)] for seq in seqs]
 
     @classmethod
     def preprocess(cls, texts, type, in_file=None, out_file=None):
