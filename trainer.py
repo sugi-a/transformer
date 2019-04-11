@@ -40,7 +40,7 @@ def get_learning_rate(step, warm_up_step, embed_size):
     return rate
 
 def train():
-    basicConfig()
+    basicConfig(level=DEBUG)
     logger.info('Start.')
     print('start')
     
@@ -72,21 +72,36 @@ def train():
     from translate import Inference
 
     # train dataset
-    train_data = (dataprocessing.make_dataset_source_target(
-                    Config.source_train_tok,
-                    Config.target_train_tok,
-                    Config.vocab_source,
-                    Config.vocab_target,
-                    UNK_ID=Config.UNK_ID,
-                    EOS_ID=Config.EOS_ID,
-                    shuffle_size=2000*1000,
-                    ncpu=args.n_cpu_cores)
-        .filter(lambda x,y: tf.logical_and(tf.greater(Hyperparams.maxlen, x[1]),
-                                         tf.greater(Hyperparams.maxlen, y[1])))
-        .padded_batch(Hyperparams.batch_size // args.n_gpus,
-                      (([None], []), ([None], [])),
-                      ((Config.PAD_ID, 0), (Config.PAD_ID, 0)))
-        .prefetch(args.n_gpus * 2))
+    if Hyperparams.fixed_batch_capacity:
+        logger.info('Calling make_dataset_source_target_const_capacity_batch')
+        train_data = dataprocessing.make_dataset_source_target_const_capacity_batch(Config.source_train_tok,
+            Config.target_train_tok,
+            Config.vocab_source,
+            Config.vocab_target,
+            UNK_ID=Config.UNK_ID,
+            EOS_ID=Config.EOS_ID,
+            PAD_ID=Config.PAD_ID,
+            maxlen=Hyperparams.maxlen,
+            batch_capacity=Hyperparams.fixed_batch_capacity // args.n_gpus,
+            ncpu=args.n_cpu_cores)
+        train_data = train_data.shuffle(1000 * 200)
+        train_data = train_data.prefetch(args.n_gpus * 2)
+    else:
+        train_data = (dataprocessing.make_dataset_source_target(
+                        Config.source_train_tok,
+                        Config.target_train_tok,
+                        Config.vocab_source,
+                        Config.vocab_target,
+                        UNK_ID=Config.UNK_ID,
+                        EOS_ID=Config.EOS_ID,
+                        shuffle_size=2000*1000,
+                        ncpu=args.n_cpu_cores)
+            .filter(lambda x,y: tf.logical_and(tf.greater(Hyperparams.maxlen, x[1]),
+                                             tf.greater(Hyperparams.maxlen, y[1])))
+            .padded_batch(Hyperparams.batch_size // args.n_gpus,
+                          (([None], []), ([None], [])),
+                          ((Config.PAD_ID, 0), (Config.PAD_ID, 0)))
+            .prefetch(args.n_gpus * 2))
 
     # dev dataset
     dev_data = dataprocessing.make_dataset_source_target(

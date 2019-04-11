@@ -32,6 +32,9 @@ class Hyperparams:
     #beam search
     length_penalty_a = 1
 
+    # Train data loading logic
+    fixed_batch_capacity = False
+
 """
 
 # About data processing and BLEU evaluation
