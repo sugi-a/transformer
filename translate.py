@@ -77,7 +77,7 @@ class Inference:
             self.input_method = input_method
 
             if batch_capacity is None:
-                batch_capacity = Hyperparams.batch_size * Hyperparams.maxlen * 4
+                batch_capacity = Hyperparams.batch_size * Hyperparams.maxlen
             self.batch_capacity = batch_capacity
 
             if self.input_method == Inference.DATASET:
@@ -254,6 +254,7 @@ class Inference:
 
         # Translate
         batch_capacity = self.batch_capacity // beam_size
+        logger.debug('batch capacity: {}'.format(batch_capacity))
 
         if init_y_texts is None:
             init_y_texts = [''] * len(texts)
@@ -264,7 +265,8 @@ class Inference:
                 init_y_texts, Config.vocab_source, Config.vocab_target, Config.UNK_ID, Config.EOS_ID,
                 Config.PAD_ID, batch_capacity,
                 batch_capacity=batch_capacity,
-                sort=False)
+                sort=False,
+                allow_skip=False)
 
             candidates, scores = self.do_beam_search(dataset, beam_size, session, checkpoint, reuse_session)
         else:
@@ -272,7 +274,8 @@ class Inference:
                 init_y_texts, Config.vocab_source, Config.vocab_target, Config.UNK_ID, Config.EOS_ID,
                 Config.PAD_ID, batch_capacity,
                 batch_capacity=batch_capacity,
-                sort=False)
+                sort=False,
+                allow_skip=False)
 
             candidates, scores = self.do_beam_search_placeholder(batches, beam_size, session, checkpoint,
                 reuse_session)

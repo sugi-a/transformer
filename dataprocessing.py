@@ -100,7 +100,8 @@ def make_batches_source_target_const_capacity_batch_from_list(
                 maxlen,
                 batch_capacity,
                 ncpu=8,
-                sort=True):
+                sort=True,
+                allow_skip=True):
     '''
     Args: Mostly the same as make_dataset_source_target.
         maxlen: a sentence pair is ignored if one or both sentence in it has more tokens than `maxlen`
@@ -150,6 +151,7 @@ def make_batches_source_target_const_capacity_batch_from_list(
 
         # Skip too long sequences
         if s_len > maxlen or t_len > maxlen or s_len > batch_capacity or t_len > batch_capacity:
+            assert allow_skip
             n_ignored_pairs += 1
             continue
 
@@ -194,7 +196,8 @@ def make_dataset_source_target_const_capacity_batch_from_list(
                 maxlen,
                 batch_capacity,
                 ncpu=8,
-                sort=True):
+                sort=True,
+                allow_skip=True):
     '''
     Args: Mostly the same as make_dataset_source_target.
         maxlen: a sentence pair is ignored if one or both sentence in it has more tokens than `maxlen`
@@ -211,7 +214,7 @@ def make_dataset_source_target_const_capacity_batch_from_list(
 
     padded_batches = make_batches_source_target_const_capacity_batch_from_list(source_list,
         target_list, source_vocab_file_name, target_vocab_file_name, UNK_ID, EOS_ID, PAD_ID, maxlen,
-        batch_capacity, ncpu, sort)
+        batch_capacity, ncpu, sort, allow_skip)
 
     # Make dataset
     dataset = tf.data.Dataset.from_generator(
@@ -233,7 +236,8 @@ def make_dataset_source_target_const_capacity_batch(
                 maxlen,
                 batch_capacity,
                 ncpu=8,
-                sort=True):
+                sort=True,
+                allow_skip=True):
     '''
     Args: Mostly the same as make_dataset_source_target.
         maxlen: a sentence pair is ignored if one or both sentence in it has more tokens than `maxlen`
@@ -256,7 +260,7 @@ def make_dataset_source_target_const_capacity_batch(
 
     return make_dataset_source_target_const_capacity_batch_from_list(souce_lines,
         target_lines, source_vocab_file_name, target_vocab_file_name, UNK_ID,
-        EOS_ID, PAD_ID, maxlen, batch_capacity, ncpu, sort)
+        EOS_ID, PAD_ID, maxlen, batch_capacity, ncpu, sort, allow_skip)
 
 def make_dataset_single(file_name, vocab_file_name, UNK_ID, EOS_ID, ncpu=8):
     table = tf.contrib.lookup.index_table_from_file(
