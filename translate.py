@@ -31,7 +31,11 @@ from model_config import Config
 from model_config import Hyperparams
 
 class Inference:
-    def __init__(self, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=8): 
+    # Data input method keys
+    DATASET = 'dataset'
+    PLACE_HOLDER = 'placeholder'
+
+    def __init__(self, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=8, input_method=PLACE_HOLDER, batch_capacity=None):
         """Build translator
         
         Args:
@@ -66,20 +70,41 @@ class Inference:
         self.checkpoint = checkpoint
 
         with self.graph.as_default():
-            # input Iterator
-            self.inputs_itr = tf.data.Iterator.from_structure(
-                ((tf.int32, tf.int32), (tf.int32, tf.int32)),
-                ((tf.TensorShape([None, None]), tf.TensorShape([None])),
-                (tf.TensorShape([None, None]), tf.TensorShape([None])))
-            )
+            # Make inputs. self.inputs_parallel is built and,
+            # if method=dataset, self.inputs_itr is built
+            # if method=placeholder, self.ph_dict is built
+            assert input_method == Inference.DATASET or input_method == Inference.PLACE_HOLDER
+            self.input_method = input_method
 
+            if batch_capacity is None:
+                batch_capacity = Hyperparams.batch_size * Hyperparams.maxlen * 4
+            self.batch_capacity = batch_capacity
 
-            if self.n_gpus == 1:
-                # Single GPU
-                self.inputs_parallel = [self.inputs_itr.get_next()]
+            if self.input_method == Inference.DATASET:
+                # input Iterator
+                self.inputs_itr = tf.data.Iterator.from_structure(
+                    ((tf.int32, tf.int32), (tf.int32, tf.int32)),
+                    ((tf.TensorShape([None, None]), tf.TensorShape([None])),
+                    (tf.TensorShape([None, None]), tf.TensorShape([None])))
+                )
+
+                if self.n_gpus == 1:
+                    # Single GPU
+                    self.inputs_parallel = [self.inputs_itr.get_next()]
+                else:
+                    # parallel inputs must be taken from the Iterator in the same order as the original
+                    # so `get_next()` should be called only once.
+                    self.inputs_parallel = non_even_split(self.inputs_itr.get_next(), self.n_gpus)
             else:
-                # parallel inputs must be taken from the Iterator in the right order
-                self.inputs_parallel = non_even_split(self.inputs_itr.get_next(), self.n_gpus)
+                self.ph_dict = {
+                    'x': tf.placeholder(tf.int32, [None, None]),
+                    'x_len': tf.placeholder(tf.int32, [None]),
+                    'init_y': tf.placeholder(tf.int32, [None, None]),
+                    'init_y_len': tf.placeholder(tf.int32, [None])
+                }
+                self.inputs_parallel = non_even_split(
+                    ((self.ph_dict['x'], self.ph_dict['x_len']),
+                    (self.ph_dict['init_y'], self.ph_dict['init_y_len'])), self.n_gpus)
             
             # computation graph
             self.beam_size_ph = tf.placeholder(tf.int32, [])
@@ -95,8 +120,29 @@ class Inference:
                 return beam_candidates, scores
             self.beam_candidates_scores = compute_parallel(_beam_search, self.inputs_parallel) # [n_gpus]
 
-             
-    def do_beam_search(self, dataset, beam_size, session=None, checkpoint=None, reuse_session=True, init_y_dataset=None):
+    def prepare_session(self, checkpoint=None, reuse_session=True):
+        '''
+            '''
+        if self.session and reuse_session:
+            logger.info('Reusing session')
+            session = self.session
+        else:
+            if self.session:
+                self.session.close()
+
+            checkpoint = checkpoint or self.checkpoint
+            assert checkpoint is not None
+
+            session_config = tf.ConfigProto()
+            session_config.allow_soft_placement = True
+            logger.info('Create new Session to perform beam search.')
+            session = tf.Session(config=session_config, graph=self.graph)
+            self.session = session
+            saver = tf.train.Saver()
+            saver.restore(session, checkpoint)
+        return session
+
+    def do_beam_search(self, dataset, beam_size, session=None, checkpoint=None, reuse_session=True):
         """conduct beam search producing results as numpy arrays.
         Args:
             session: `tf.Session` to be used. If `None`, a new one is created and reused.
@@ -106,56 +152,16 @@ class Inference:
         Returns:
             A tuple of two lists: beam candidates and their scores.
             The structure is ([batch_size, beam_size, length(variable)], [batch_size, beam_size])"""
+
+        assert self.input_method == Inference.DATASET
         
         logger.info('Beam search decoding.')
-        session_to_close = None
         with self.graph.as_default():
             if session is None:
-                if reuse_session and self.session:
-                    logger.info('Reusing session')
-                    session = self.session
-                else:
-                    logger.info('Create new Session to perform beam search.')
-                    checkpoint = checkpoint or self.checkpoint
-                    assert checkpoint is not None
-
-                    session_config = tf.ConfigProto()
-                    session_config.allow_soft_placement = True
-                    session = tf.Session(config=session_config)
-
-                    if reuse_session:
-                        try:
-                            self.session.close()
-                        except:
-                            pass
-                        self.session = session
-                    else:
-                        session_to_close = session
-
-                    # initialization
-                    session.run([tf.global_variables_initializer(), tf.tables_initializer()])
-
-                    # restoration of variables
-                    saver = tf.train.Saver()
-                    saver.restore(session, checkpoint)
+                session = self.prepare_session(checkpoint=checkpoint, reuse_session=reuse_session)
             else:
                 assert session.graph is self.graph
 
-            # dataset of the initial translations given
-            if init_y_dataset is None:
-                # Create init_y_dataset (empty sequences) if not specified
-                init_y_dataset = tf.data.Dataset.from_tensors((tf.zeros([0], dtype=tf.int32), 0))
-                init_y_dataset = init_y_dataset.repeat()
-
-            # merge the main inputs and the initial translation datasets
-            dataset = tf.data.Dataset.zip((dataset, init_y_dataset))
-
-            # batch dataset
-            #batch_size = (Hyperparams.batch_size // self.n_gpus) * 4 // (beam_size ** 2)
-            batch_size = (Hyperparams.batch_size) * 2 // (beam_size) + 1
-            dataset = dataset.padded_batch(batch_size,
-                                            (([None], []), ([None], [])),
-                                            ((Config.PAD_ID, 0), (Config.PAD_ID, 0)))
             dataset = dataset.prefetch(self.n_gpus * 2)
 
             # initialization of the input Iterator
@@ -172,17 +178,58 @@ class Inference:
                 except tf.errors.OutOfRangeError:
                     break
                 iter_count += 1
-                sys.stderr.write('{} sec/sample, samples processed: {}   \r'.format(
-                    (time.time() - start_time)/iter_count/batch_size,
-                    iter_count * batch_size))
+                sys.stderr.write('{} sec/step. {}-th step.   \r'.format(
+                    (time.time() - start_time)/iter_count, iter_count))
 
             # candidates: [batch_size, beam_size, length(variable)], scores: [batch_size, beam_size]
             candidates, scores = [sum([array.tolist() for array in arrays], []) for arrays in zip(*run_results)]
 
-            if session_to_close is not None:
-                session_to_close.close()
-        
         return candidates, scores
+
+    def do_beam_search_placeholder(self, batches, beam_size, session=None, checkpoint=None, reuse_session=True):
+        """conduct beam search producing results as list of integers.
+        Args:
+            session: `tf.Session` to be used. If `None`, a new one is created and reused.
+                If specified, its `graph`
+                must be the same as self.graph and all the variables used must be initialized before calling
+                this method.
+            batches: [batches: (([batch_size: [length: int]], [batch_size: int]),
+                                ([batch_size: [length: int]], [batch_size: int]))]
+        Returns:
+            A tuple of two lists: beam candidates and their scores.
+            The structure is ([batch_size, beam_size, length(variable)], [batch_size, beam_size])"""
+
+        assert self.input_method == Inference.PLACE_HOLDER
+
+        logger.info('Beam search decoding.')
+        with self.graph.as_default():
+            if session is None:
+                session = self.prepare_session(checkpoint=checkpoint, reuse_session=reuse_session)
+            else:
+                assert session.graph is self.graph
+
+            # Beam search
+            run_results = []
+            start_time = time.time()
+            iter_count = 0
+            for batch in batches:
+                run_results.extend(session.run(self.beam_candidates_scores,
+                    feed_dict={
+                        self.beam_size_ph: beam_size,
+                        self.ph_dict['x']: batch[0][0],
+                        self.ph_dict['x_len']: batch[0][1],
+                        self.ph_dict['init_y']: batch[1][0],
+                        self.ph_dict['init_y_len']: batch[1][1]}))
+                iter_count += 1
+                sys.stderr.write('{} sec/step, steps: {}/{}   \r'.format(
+                    (time.time() - start_time)/iter_count, iter_count, len(batches)))
+
+            # candidates: [batch_size, beam_size, length(variable)], scores: [batch_size, beam_size]
+            candidates, scores = [sum([array.tolist() for array in arrays], []) for arrays in zip(*run_results)]
+
+        return candidates, scores
+
+
 
 
     def translate_sentences(self, texts, beam_size=1, return_search_results=False, checkpoint=None, session=None, reuse_session=True, init_y_texts=None, return_in_subwords=False):
@@ -205,22 +252,31 @@ class Inference:
                     str which have been produced by decoding the subword sequence
             """
 
-        dataset = dataprocessing.make_dataset_single_from_texts(texts,
-                                                                Config.vocab_source,
-                                                                Config.UNK_ID,
-                                                                Config.EOS_ID,
-                                                                self.n_cpu_cores)
-        if init_y_texts is not None:
-            assert len(texts) == len(init_y_texts)
-            init_y_dataset = dataprocessing.make_dataset_single_from_texts(init_y_texts,
-                                                                Config.vocab_target,
-                                                                Config.UNK_ID,
-                                                                Config.EOS_ID,
-                                                                self.n_cpu_cores)
-        else:
-            init_y_dataset = None
+        # Translate
+        batch_capacity = self.batch_capacity // beam_size
 
-        candidates, scores = self.do_beam_search(dataset, beam_size, session, checkpoint, reuse_session, init_y_dataset)
+        if init_y_texts is None:
+            init_y_texts = [''] * len(texts)
+
+        if self.input_method == Inference.DATASET:
+
+            dataset = dataprocessing.make_dataset_source_target_const_capacity_batch_from_list(texts,
+                init_y_texts, Config.vocab_source, Config.vocab_target, Config.UNK_ID, Config.EOS_ID,
+                Config.PAD_ID, batch_capacity,
+                batch_capacity=batch_capacity,
+                sort=False)
+
+            candidates, scores = self.do_beam_search(dataset, beam_size, session, checkpoint, reuse_session)
+        else:
+            batches = dataprocessing.make_batches_source_target_const_capacity_batch_from_list(texts,
+                init_y_texts, Config.vocab_source, Config.vocab_target, Config.UNK_ID, Config.EOS_ID,
+                Config.PAD_ID, batch_capacity,
+                batch_capacity=batch_capacity,
+                sort=False)
+
+            candidates, scores = self.do_beam_search_placeholder(batches, beam_size, session, checkpoint,
+                reuse_session)
+
 
         if return_search_results:
             nsamples = len(candidates)
@@ -332,3 +388,6 @@ def write_BLEU_results_to_file(prefix, sources, score, references, translations)
             for s,r,t in zip(sources, references, translations)])
         s_f.write(str(score) + '\n')
 
+
+class InferenceWithPlaceholder(Inference):
+    """"""

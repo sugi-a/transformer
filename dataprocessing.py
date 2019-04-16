@@ -89,9 +89,9 @@ def make_dataset_source_target(
         dataset = dataset.shuffle(shuffle_size)
     return dataset.map(lambda s,t: (__string2sequence(s, EOS_ID, tables[0]), __string2sequence(t, EOS_ID, tables[1])), ncpu)
     
-def make_dataset_source_target_const_capacity_batch(
-                source_file_name,
-                target_file_name,
+def make_batches_source_target_const_capacity_batch_from_list(
+                source_list,
+                target_list,
                 source_vocab_file_name,
                 target_vocab_file_name,
                 UNK_ID,
@@ -99,22 +99,26 @@ def make_dataset_source_target_const_capacity_batch(
                 PAD_ID,
                 maxlen,
                 batch_capacity,
-                ncpu=8):
+                ncpu=8,
+                sort=True):
     '''
     Args: Mostly the same as make_dataset_source_target.
         maxlen: a sentence pair is ignored if one or both sentence in it has more tokens than `maxlen`
         batch_capacity: batch's capacity (=shape[0]*shape[1]) doesn't exceed this value.
     Returns:
-        Dataset is sorted by the number of tokens in the source sentences and then batched from the beginning.
+        List of nested structure:
+        [batches: (([batch_size: [length: int]], [batch_size: int]),
+                    ([batch_size: [length: int]], [batch_size: int]))]
+        Samples are sorted by the number of tokens in the source sentences and then batched from the beginning.
         When batching, this method tries to put as many samples as possible into the batch while
         keeping the batch's capacity (shape[0] * shape[1]) less than `batch_capacity`.
         Note that in every training iteration, composition of each batch is invariant: shuffling in
         every training iteration changes the order of batches but the contents in each batch remains the same.
         
     '''
-    logger.info('make_dataset_source_target_const_capacity_batch')
+    logger.info('make_batches_source_target_const_capacity_batch_from_list')
 
-    assert maxlen < batch_capacity
+    assert maxlen <= batch_capacity
 
     # Make token->ID mapping
     with codecs.open(source_vocab_file_name) as sv_f, codecs.open(target_vocab_file_name) as tv_f:
@@ -122,25 +126,24 @@ def make_dataset_source_target_const_capacity_batch(
         t_token2ID = {line.split()[0]: offset for offset, line in enumerate(tv_f)}
 
     # Read lines from the source/target file and zip
-    logger.info('Reading data file.')
-    with codecs.open(source_file_name, 'r') as s_f, codecs.open(target_file_name) as t_f:
-        # [dataset size: ([source length: str], [target length: str])]
-        zipped_lines = [(sl.strip().split(' '), tl.strip().split(' ')) for sl,tl in zip(s_f, t_f)]
+    # [dataset size: ([source length: str], [target length: str])]
+    zipped_lines = [(sl.strip().split(' '), tl.strip().split(' ')) for sl,tl in zip(source_list, target_list)]
 
     # Sort by the number of tokens in the source sentence
-    zipped_lines.sort(key=lambda x:len(x[0]))
+    if sort:
+        zipped_lines.sort(key=lambda x:len(x[0]))
 
     # Make batches
     logger.info('Making batches. #pairs in the original dataset:{}'.format(len(zipped_lines)))
     batches = []
-    s_batch, t_batch, s_lens, t_lens = [], [], [], []
+    s_batch, t_batch, s_lens, t_lens = None, None, None, None
     batch_size = 0 # batch_shape[0]
-    batch_length = 0 # batch_shzpe[1]
+    batch_length = 1e9 # batch_shzpe[1]
     n_ignored_pairs = 0
     for s_seq, t_seq in zipped_lines:
         # Convert tokens to IDs and EOS
-        s_seq = [s_token2ID.get(token, UNK_ID) for token in s_seq] + [EOS_ID]
-        t_seq = [t_token2ID.get(token, UNK_ID) for token in t_seq] + [EOS_ID]
+        s_seq = [s_token2ID.get(token, UNK_ID) for token in s_seq if len(token) > 0] + [EOS_ID]
+        t_seq = [t_token2ID.get(token, UNK_ID) for token in t_seq if len(token) > 0] + [EOS_ID]
 
         # get sequence length
         s_len, t_len = len(s_seq), len(t_seq)
@@ -178,6 +181,38 @@ def make_dataset_source_target_const_capacity_batch(
         padded_batches.append(((padded_s_batch, s_lens), (padded_t_batch, t_lens)))
     logger.info('Padding batches done.')
 
+    return padded_batches
+
+def make_dataset_source_target_const_capacity_batch_from_list(
+                source_list,
+                target_list,
+                source_vocab_file_name,
+                target_vocab_file_name,
+                UNK_ID,
+                EOS_ID,
+                PAD_ID,
+                maxlen,
+                batch_capacity,
+                ncpu=8,
+                sort=True):
+    '''
+    Args: Mostly the same as make_dataset_source_target.
+        maxlen: a sentence pair is ignored if one or both sentence in it has more tokens than `maxlen`
+        batch_capacity: batch's capacity (=shape[0]*shape[1]) doesn't exceed this value.
+    Returns:
+        Dataset is sorted by the number of tokens in the source sentences and then batched from the beginning.
+        When batching, this method tries to put as many samples as possible into the batch while
+        keeping the batch's capacity (shape[0] * shape[1]) less than `batch_capacity`.
+        Note that in every training iteration, composition of each batch is invariant: shuffling in
+        every training iteration changes the order of batches but the contents in each batch remains the same.
+        
+    '''
+    logger.info('make_dataset_source_target_const_capacity_batch_from_list')
+
+    padded_batches = make_batches_source_target_const_capacity_batch_from_list(source_list,
+        target_list, source_vocab_file_name, target_vocab_file_name, UNK_ID, EOS_ID, PAD_ID, maxlen,
+        batch_capacity, ncpu, sort)
+
     # Make dataset
     dataset = tf.data.Dataset.from_generator(
         lambda: padded_batches,
@@ -186,6 +221,42 @@ def make_dataset_source_target_const_capacity_batch(
     dataset = dataset.map(lambda s,t: nest.map_structure(lambda x:tf.cast(x, tf.int32), (s, t)))
 
     return dataset
+
+def make_dataset_source_target_const_capacity_batch(
+                source_file_name,
+                target_file_name,
+                source_vocab_file_name,
+                target_vocab_file_name,
+                UNK_ID,
+                EOS_ID,
+                PAD_ID,
+                maxlen,
+                batch_capacity,
+                ncpu=8,
+                sort=True):
+    '''
+    Args: Mostly the same as make_dataset_source_target.
+        maxlen: a sentence pair is ignored if one or both sentence in it has more tokens than `maxlen`
+        batch_capacity: batch's capacity (=shape[0]*shape[1]) doesn't exceed this value.
+    Returns:
+        Dataset is sorted by the number of tokens in the source sentences and then batched from the beginning.
+        When batching, this method tries to put as many samples as possible into the batch while
+        keeping the batch's capacity (shape[0] * shape[1]) less than `batch_capacity`.
+        Note that in every training iteration, composition of each batch is invariant: shuffling in
+        every training iteration changes the order of batches but the contents in each batch remains the same.
+        
+    '''
+    logger.info('make_dataset_source_target_const_capacity_batch')
+
+    logger.info('Reading data file.')
+    with codecs.open(source_file_name, 'r') as s_f, codecs.open(target_file_name) as t_f:
+        source_lines = s_f.readlines()
+        target_lines = t_f.readlines()
+
+
+    return make_dataset_source_target_const_capacity_batch_from_list(souce_lines,
+        target_lines, source_vocab_file_name, target_vocab_file_name, UNK_ID,
+        EOS_ID, PAD_ID, maxlen, batch_capacity, ncpu, sort)
 
 def make_dataset_single(file_name, vocab_file_name, UNK_ID, EOS_ID, ncpu=8):
     table = tf.contrib.lookup.index_table_from_file(
