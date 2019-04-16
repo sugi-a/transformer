@@ -389,7 +389,7 @@ class Transformer(tf.layers.Layer):
                                          'v': tf.zeros([batch_size, 0, self.hparams.attention_size])}
 
         with tf.name_scope('max_length'):
-            maxlen = tf.math.maximum(512, tf.shape(x)[1] * 2 + 5) # hard coding
+            maxlen = tf.math.minimum(512, tf.shape(x)[1] * 2 + 5) # hard coding
 
         with tf.name_scope('dec_self_attn_bias'):
             dec_self_attn_bias = make_attention_bias_triangle(maxlen)
