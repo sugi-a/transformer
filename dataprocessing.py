@@ -82,9 +82,18 @@ def make_dataset_source_target(
                 default_value=UNK_ID,
                 key_column_index=0)
                 for vocab_file_name in (source_vocab_file_name, target_vocab_file_name)]
-    source_dataset = tf.data.TextLineDataset(source_file_name)
-    target_dataset = tf.data.TextLineDataset(target_file_name)
-    dataset = tf.data.Dataset.zip((source_dataset, target_dataset))
+    if type(source_file_name) == type([]):
+        assert type(target_file_name)==type([]) and len(target_file_name)==len(source_file_name)
+        source_fnames = tf.data.Dataset.from_tensor_slices(source_file_name)
+        target_fnames = tf.data.Dataset.from_tensor_slices(target_file_name)
+        dataset = tf.data.Dataset.zip((source_fnames, target_fnames))
+        dataset = dataset.shuffle(len(source_file_name))
+        dataset = dataset.flat_map(lambda sn,tn:
+            tf.data.Dataset.zip(tuple(tf.data.TextLineDataset(fname) for fname in [sn,tn])))
+    else:
+        source_dataset = tf.data.TextLineDataset(source_file_name)
+        target_dataset = tf.data.TextLineDataset(target_file_name)
+        dataset = tf.data.Dataset.zip((source_dataset, target_dataset))
     if shuffle_size is not None:
         dataset = dataset.shuffle(shuffle_size)
     return dataset.map(lambda s,t: (__string2sequence(s, EOS_ID, tables[0]), __string2sequence(t, EOS_ID, tables[1])), ncpu)
@@ -253,10 +262,17 @@ def make_dataset_source_target_const_capacity_batch(
     logger.info('make_dataset_source_target_const_capacity_batch')
 
     logger.info('Reading data file.')
-    with codecs.open(source_file_name, 'r') as s_f, codecs.open(target_file_name) as t_f:
-        source_lines = s_f.readlines()
-        target_lines = t_f.readlines()
-
+    if type(source_file_name) == type([]):
+        assert len(source_file_name) == len(target_file_name)
+        source_lines, target_lines = [], []
+        for sfn, tfn in zip(source_file_name, target_file_name):
+            with codecs.open(sfn, 'r') as s_f, codecs.open(tfn, 'r') as t_f:
+                source_lines.extend(s_f.readlines())
+                target_lines.extend(t_f.readlines())
+    else:
+        with codecs.open(source_file_name, 'r') as s_f, codecs.open(target_file_name) as t_f:
+            source_lines = s_f.readlines()
+            target_lines = t_f.readlines()
 
     return make_dataset_source_target_const_capacity_batch_from_list(souce_lines,
         target_lines, source_vocab_file_name, target_vocab_file_name, UNK_ID,
