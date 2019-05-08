@@ -35,13 +35,15 @@ class Inference:
     DATASET = 'dataset'
     PLACE_HOLDER = 'placeholder'
 
-    def __init__(self, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=8, input_method=PLACE_HOLDER, batch_capacity=None):
+    def __init__(self, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=8, input_method=PLACE_HOLDER, batch_capacity=None, sampling_method=None):
         """Build translator
         
         Args:
             graph: the graph under in which the inference network is built.
                    if None, the default graph will be used.
             checkpoint: Name of the checkpoint from which the value of parameters will be restored. You can specify it later.
+            sampling_method: if None or 0, the normal beam search is applied.
+                if 1, sampling method [Edunov+, 2018] is used, in which beam_size is ignored.
         """
         self.n_cpu_cores = n_cpu_cores
         self.n_gpus = n_gpus
@@ -116,7 +118,8 @@ class Inference:
                     self.beam_size_ph,
                     return_search_results=True,
                     init_y=init_y,
-                    init_y_len=init_y_len)
+                    init_y_len=init_y_len,
+                    sampling_method=sampling_method)
                 return beam_candidates, scores
             self.beam_candidates_scores = compute_parallel(_beam_search, self.inputs_parallel) # [n_gpus]
 

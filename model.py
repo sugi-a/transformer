@@ -357,7 +357,7 @@ class Transformer(tf.layers.Layer):
         dec_outputs = self.decoder(dec_inputs, enc_outputs, dec_self_attn_bias, dec_ctx_attn_bias, training=training)
         return dec_outputs
 
-    def decode(self, x, x_len, beam_size=8, return_search_results=False, init_y=None, init_y_len=None):
+    def decode(self, x, x_len, beam_size=8, return_search_results=False, init_y=None, init_y_len=None, sampling_method=None):
         """Given inputs x, this method produces translation candidates by beam search
         and return the all results if `return_search_results` is True, or the sequence with the MAP otherwise.
         Args:
@@ -456,7 +456,8 @@ class Transformer(tf.layers.Layer):
                                                      maxlen,
                                                      self.config.EOS_ID,
                                                      self.config.PAD_ID,
-                                                     self.hparams.length_penalty_a)
+                                                     self.hparams.length_penalty_a,
+                                                     sampling_method=sampling_method)
 
         with tf.name_scope('post_check_empty_batch'):
             beam_candidates = tf.cond(input_is_empty, lambda: beam_candidates[:0], lambda: beam_candidates)
@@ -470,7 +471,9 @@ class Transformer(tf.layers.Layer):
             return top_seqs
 
 
-def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inputs_len, beam_size, maxlen, eos_id, pad_id=0, alpha=1):
+SAMPLING_METHOD_TOPK = 0
+SAMPLING_METHOD_SAMPLING = 1
+def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inputs_len, beam_size, maxlen, eos_id, pad_id=0, alpha=1, sampling_method=SAMPLING_METHOD_TOPK):
     """
     Args:
         get_logits_fn: produces logits given decoder inputs and cached inputs
@@ -488,6 +491,10 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
         sos_id: Start of sequence ID. It's not necessary when `init_dec_inputs` is specified.
         alpha: Parameter for length normalization (length penalty)
         init_dec_inputs: If None, SOS is used as the first inputs to decoder. Its shape must be [batch_size, 1]
+        sampling_method: SAMPLING_METHOD_TOPK or SAMPLING_METHOD_SAMPLING. The former is the
+            normal beam search. The latter samples the next token from the categorical
+            distribution, in which case the specified `beam_size` is ignored and the beam
+            search is performed with beam size 1.
     Returns:
         Beam candidates with shape [batch_size, beam_size, length] and
         beam scores with shape [batch_size, beam_size]
@@ -503,6 +510,9 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
 
         """
     NEG_INF = -1e9
+
+    if sampling_method == SAMPLING_METHOD_SAMPLING:
+        beam_size = 1
     
     with tf.name_scope('batch_size'):
         batch_size = tf.shape(nest.flatten(init_cache)[0])[0]
@@ -569,7 +579,15 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
             with tf.name_scope('preliminary_top_ids_and_log_probs'):
                 # get the top k=beam_size for each sequence
                 # [batch_size*b, 1, beam_size]
-                top_logits, ids = tf.math.top_k(logits, beam_size, False, name='preliminary_tops') 
+                if sampling_method is None or sampling_method == SAMPLING_METHOD_TOPK:
+                    top_logits, ids = tf.math.top_k(logits, beam_size, False, name='preliminary_tops') 
+                else:
+                    assert sampling_method == SAMPLING_METHOD_SAMPLING
+                    _logits = logits[:, 0] # [batch_size * b, vocab_size]
+                    ids = tf.random.multinomial(_logits, 1) # [batch_size*b, beam_size=1]
+                    ids = tf.cast(ids, tf.int32)
+                    ids = tf.expand_dims(ids, axis=-1) # [batch_size*b, 1, beam_size=1]
+                    top_logits = tf.batch_gather(logits, ids) # [batch_size*b, 1, beam_size=1]
 
                 # get the log probabilities
                 with tf.name_scope('logits_to_log_prob'):
