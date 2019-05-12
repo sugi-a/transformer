@@ -389,6 +389,7 @@ class Transformer(tf.layers.Layer):
                                          'v': tf.zeros([batch_size, 0, self.hparams.attention_size])}
 
         with tf.name_scope('max_length'):
+            maxlens = tf.math.minimum(512, x_len * 2 + 5)
             maxlen = tf.math.minimum(512, tf.shape(x)[1] * 2 + 5) # hard coding
 
         with tf.name_scope('dec_self_attn_bias'):
@@ -447,13 +448,14 @@ class Transformer(tf.layers.Layer):
                 lambda: nest.map_structure(size1_dummy, [cache, init_dec_inputs, init_dec_inputs_len]),
                 lambda: [cache, init_dec_inputs, init_dec_inputs_len])
             maxlen = tf.cond(input_is_empty, lambda: 3, lambda: maxlen)
+            maxlens = tf.cond(input_is_empty, lambda: tf.constant([3],tf.int32), lambda: maxlens)
 
         beam_candidates, scores = beam_search_decode(get_logits_fn,
                                                      cache,
                                                      init_dec_inputs,
                                                      init_dec_inputs_len,
                                                      beam_size,
-                                                     maxlen,
+                                                     maxlens,
                                                      self.config.EOS_ID,
                                                      self.config.PAD_ID,
                                                      self.hparams.length_penalty_a,
@@ -473,7 +475,7 @@ class Transformer(tf.layers.Layer):
 
 SAMPLING_METHOD_TOPK = 0
 SAMPLING_METHOD_SAMPLING = 1
-def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inputs_len, beam_size, maxlen, eos_id, pad_id=0, alpha=1, sampling_method=SAMPLING_METHOD_TOPK):
+def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inputs_len, beam_size, maxlens, eos_id, pad_id=0, alpha=1, sampling_method=SAMPLING_METHOD_TOPK):
     """
     Args:
         get_logits_fn: produces logits given decoder inputs and cached inputs
@@ -485,7 +487,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
 
         init_cache: The initial cache. Each element is of shape [batch_size, ..., embed_size]
         beam_size: int value indicating the beam window width
-        maxlen: The maximum length sequences can be
+        maxlens: The maximum length sequences can be. [batch_size]
         eos_id: EOS token ID.
         pad_id: PAD token ID which defaults to 0
         sos_id: Start of sequence ID. It's not necessary when `init_dec_inputs` is specified.
@@ -513,6 +515,8 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
 
     if sampling_method == SAMPLING_METHOD_SAMPLING:
         beam_size = 1
+
+    maxlen = tf.reduce_max(maxlens)
     
     with tf.name_scope('batch_size'):
         batch_size = tf.shape(nest.flatten(init_cache)[0])[0]
@@ -597,6 +601,18 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
                 with tf.name_scope('restore_shape'):
                     log_prob = tf.reshape(log_prob, [batch_size, beam_size ** 2]) # [batch_size, beam_size^2]
                     ids = tf.reshape(ids, [batch_size, beam_size ** 2, 1]) # [batch_size, beam_size^2, 1]
+                with tf.name_scope('check_max_length'):
+                    exceeding_maxlens = tf.greater_equal(predicting_pos, maxlens) #[batch]
+                    log_prob = tf.where(
+                        tf.broadcast_to(exceeding_maxlens[:,None], tf.shape(log_prob)),
+                        tf.broadcast_to([[NEG_INF]], tf.shape(log_prob)),
+                        log_prob
+                        )
+                    ids = tf.where(
+                        tf.broadcast_to(exceeding_maxlens[:,None,None], tf.shape(ids)),
+                        tf.broadcast_to([[[eos_id]]], tf.shape(ids)),
+                        ids
+                            )
 
             # fork tensors. tile and reshape tensors into the shape [batch_size, beam_size^2, ...]
             # except 'dec_inputs'
