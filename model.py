@@ -758,9 +758,8 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
         # add EOS at the end of all unfinished sequences
         finish_state['generated_seq'] = tf.concat([
                 finish_state['generated_seq'][:,:,:-1],
-                tf.where(tf.expand_dims(finish_state['has_eos'], axis=-1),
-                         finish_state['generated_seq'][:,:,-1:],
-                         tf.fill(tf.shape(finish_state['generated_seq'][:,:,-1:]),eos_id))
+                tf.fill(tf.concat([tf.shape(finish_state['generated_seq'])[:-1], [1]], axis=0),
+                    eos_id)
             ], axis=2)
 
         # Fianal sort
