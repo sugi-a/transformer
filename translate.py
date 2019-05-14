@@ -108,7 +108,7 @@ class Inference:
                     ((self.ph_dict['x'], self.ph_dict['x_len']),
                     (self.ph_dict['init_y'], self.ph_dict['init_y_len'])), self.n_gpus)
             
-            # computation graph
+            # computation graph for beam search
             self.beam_size_ph = tf.placeholder(tf.int32, [])
             def _beam_search(inputs):
                 (x, x_len), (init_y, init_y_len) = inputs
@@ -122,6 +122,22 @@ class Inference:
                     sampling_method=sampling_method)
                 return beam_candidates, scores
             self.beam_candidates_scores = compute_parallel(_beam_search, self.inputs_parallel) # [n_gpus]
+
+            # Computation graph for calculation of perplexity
+            def _perplexity(inputs):
+                (x, x_len), (y, y_len) = inputs
+                logits = self.model.get_logits(x, y, x_len, y_len, False)
+                is_target = tf.sequence_mask(y_len, tf.shape(y)[1], dtype=tf.float32)
+
+                logprobs = tf.math.log_softmax(logits, axis=-1) # [batch, length, vocab]
+                seq_logprobs = tf.batch_gather(logprobs, y[:, :, None]) # [batch, length, 1]
+                seq_logprobs = seq_logprobs[:, :, 0]
+                log_perp = tf.reduce_sum(
+                    seq_logprobs * is_target / tf.reduce_sum(is_target, axis=1, keepdims=True),
+                    axis=1) # [batch]
+                perp = tf.exp(log_perp) # [batch]
+                return perp
+            self.perplexity = compute_parallel(_perplexity, self.inputs_parallel)
 
     def prepare_session(self, checkpoint=None, reuse_session=True):
         '''
@@ -232,8 +248,117 @@ class Inference:
 
         return candidates, scores
 
+    def do_calc_perplexity(self, dataset, session=None, checkpoint=None, reuse_session=True):
+        """conduct beam search producing results as numpy arrays.
+        Args:
+            session: `tf.Session` to be used. If `None`, a new one is created and reused.
+                If specified, its `graph`
+                must be the same as self.graph and all the variables used must be initialized before calling
+                this method.
+        Returns:
+            A tuple of two lists: beam candidates and their scores.
+            The structure is ([batch_size, beam_size, length(variable)], [batch_size, beam_size])"""
 
+        assert self.input_method == Inference.DATASET
+        
+        logger.debug('Perplexity Calculation')
+        with self.graph.as_default():
+            if session is None:
+                session = self.prepare_session(checkpoint=checkpoint, reuse_session=reuse_session)
+            else:
+                assert session.graph is self.graph
 
+            dataset = dataset.prefetch(self.n_gpus * 2)
+
+            # initialization of the input Iterator
+            session.run(self.inputs_itr.make_initializer(dataset))
+
+            # Calculation
+            run_results = []
+            start_time = time.time()
+            iter_count = 0
+            while True:
+                try:
+                    run_results.extend(session.run(self.perplexity))
+                except tf.errors.OutOfRangeError:
+                    break
+                iter_count += 1
+                sys.stderr.write('{} sec/step. {}-th step.   \r'.format(
+                    (time.time() - start_time)/iter_count, iter_count))
+
+            # candidates: [batch_size, beam_size, length(variable)], scores: [batch_size, beam_size]
+            perp = sum(map(lambda x:x.tolist(), run_results), [])
+            return perp
+
+    def do_calc_perplexity_placeholder(self, batches, session=None, checkpoint=None, reuse_session=True):
+        """conduct beam search producing results as list of integers.
+        Args:
+            session: `tf.Session` to be used. If `None`, a new one is created and reused.
+                If specified, its `graph`
+                must be the same as self.graph and all the variables used must be initialized before calling
+                this method.
+            batches: [batches: (([batch_size: [length: int]], [batch_size: int]),
+                                ([batch_size: [length: int]], [batch_size: int]))]
+        Returns:
+            A tuple of two lists: beam candidates and their scores.
+            The structure is ([batch_size, beam_size, length(variable)], [batch_size, beam_size])"""
+
+        assert self.input_method == Inference.PLACE_HOLDER
+
+        logger.info('Beam search decoding.')
+        with self.graph.as_default():
+            if session is None:
+                session = self.prepare_session(checkpoint=checkpoint, reuse_session=reuse_session)
+            else:
+                assert session.graph is self.graph
+
+            # Calculation of perplexity
+            run_results = []
+            start_time = time.time()
+            iter_count = 0
+            for batch in batches:
+                run_results.extend(session.run(self.perplexity,
+                    feed_dict={
+                        self.ph_dict['x']: batch[0][0],
+                        self.ph_dict['x_len']: batch[0][1],
+                        self.ph_dict['init_y']: batch[1][0],
+                        self.ph_dict['init_y_len']: batch[1][1]}))
+                iter_count += 1
+                sys.stderr.write('{} sec/step, steps: {}/{}   \r'.format(
+                    (time.time() - start_time)/iter_count, iter_count, len(batches)))
+
+            # candidates: [batch_size, beam_size, length(variable)], scores: [batch_size, beam_size]
+            perp = sum(map(lambda x:x.tolist(), run_results), [])
+            return perp
+
+    def calculate_perplexity(self, sources, targets, checkpoint=None, session=None, reuse_session=True):
+        """Calculate the perplexity of the target text given a source text.
+        Args:
+            sources: [#samples: str]"""
+
+        batch_capacity = self.batch_capacity
+
+        if self.input_method == Inference.DATASET:
+            dataset = dataprocessing.make_dataset_source_target_const_capacity_batch_from_list(
+                sources, target,
+                Config.vocab_source, Config.vocab_target, Config.UNK_ID, Config.EOS_ID,
+                Config.PAD_ID, batch_capacity,
+                batch_capacity=batch_capacity,
+                sort=False,
+                allow_skip=False)
+
+            perp = self.do_calc_perplexity(dataset, session, checkpoint, reuse_session)
+        else:
+            batches = dataprocessing.make_batches_source_target_const_capacity_batch_from_list(
+                sources, targets,
+                Config.vocab_source, Config.vocab_target, Config.UNK_ID, Config.EOS_ID,
+                Config.PAD_ID, batch_capacity,
+                batch_capacity=batch_capacity,
+                sort=False,
+                allow_skip=False)
+
+            perp = self.do_calc_perplexity_placeholder(batches, session, checkpoint, reuse_session)
+        return perp 
 
     def translate_sentences(self, texts, beam_size=1, return_search_results=False, checkpoint=None, session=None, reuse_session=True, init_y_texts=None, return_in_subwords=False):
         """translate texts. Input format should be tokenized (subword) one and the output's is preprocessed.
@@ -307,6 +432,16 @@ class Inference:
                 candidates = Config.IDs2text(candidates, Config.TARGET) #[nsamples]
 
             return candidates
+
+    def calc_perp_preprocessed_texts(self, sources, targets, *args, **kwargs):
+        sources = [' '.join(toks) for toks in Config.text2tokens(sources, Config.SOURCE)]
+        targets = [' '.join(toks) for toks in Config.text2tokens(targets, Config.TARGET)]
+        return self.calculate_perplexity(sources, targets, *args, **kwargs)
+        
+    def calc_perp_raw_texts(self, sources, targets, *args, **kwargs):
+        sources = Config.preprocess(sources, Config.SOURCE)
+        targets = Config.preprocess(targets, Config.TARGET)
+        return self.calc_perp_preprocessed_texts(sources, targets, *args, **kwargs)
         
     def translate_preprocessed_texts(self, texts, *args, init_y_texts=None, **kwargs):
         """translate texts
@@ -394,6 +529,3 @@ def write_BLEU_results_to_file(prefix, sources, score, references, translations)
             for s,r,t in zip(sources, references, translations)])
         s_f.write(str(score) + '\n')
 
-
-class InferenceWithPlaceholder(Inference):
-    """"""
