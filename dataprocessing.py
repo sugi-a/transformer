@@ -62,7 +62,8 @@ def IDs2text(seqs, model_file):
 def __string2sequence(line, EOS_ID, lookup_table):
     tokens = tf.string_split([line]).values 
     ids = tf.cast(lookup_table.lookup(tokens), tf.int32)
-    ids = tf.concat([ids, tf.fill([1], EOS_ID)], axis=0)
+    if EOS_ID is not None:
+        ids = tf.concat([ids, tf.fill([1], EOS_ID)], axis=0)
     ids_lens = (ids, tf.shape(ids)[0])
     return ids_lens
 
@@ -151,9 +152,14 @@ def make_batches_source_target_const_capacity_batch_from_list(
     batch_length = 1e9 # batch_shzpe[1]
     n_ignored_pairs = 0
     for s_seq, t_seq in zipped_lines:
-        # Convert tokens to IDs and EOS
-        s_seq = [s_token2ID.get(token, UNK_ID) for token in s_seq if len(token) > 0] + [EOS_ID]
-        t_seq = [t_token2ID.get(token, UNK_ID) for token in t_seq if len(token) > 0] + [EOS_ID]
+        # Convert tokens to IDs
+        s_seq = [s_token2ID.get(token, UNK_ID) for token in s_seq if len(token) > 0]
+        t_seq = [t_token2ID.get(token, UNK_ID) for token in t_seq if len(token) > 0]
+
+        # Add EOS
+        if EOS_ID is not None:
+            s_seq = s_seq + [EOS_ID]
+            t_seq = t_seq + [EOS_ID]
 
         # get sequence length
         s_len, t_len = len(s_seq), len(t_seq)
@@ -221,13 +227,15 @@ def make_dataset_source_target_const_capacity_batch_from_list(
     '''
     logger.info('make_dataset_source_target_const_capacity_batch_from_list')
 
-    padded_batches = make_batches_source_target_const_capacity_batch_from_list(source_list,
-        target_list, source_vocab_file_name, target_vocab_file_name, UNK_ID, EOS_ID, PAD_ID, maxlen,
-        batch_capacity, ncpu, sort, allow_skip)
+    def gen():
+        return make_batches_source_target_const_capacity_batch_from_list(
+            source_list, target_list, source_vocab_file_name,
+            target_vocab_file_name, UNK_ID, EOS_ID, PAD_ID, maxlen,
+            batch_capacity, ncpu, sort, allow_skip)
 
     # Make dataset
     dataset = tf.data.Dataset.from_generator(
-        lambda: padded_batches,
+        gen,
         ((tf.int32, tf.int32), (tf.int32, tf.int32)),
         (([None, None], [None]), ([None, None], [None])))
     dataset = dataset.map(lambda s,t: nest.map_structure(lambda x:tf.cast(x, tf.int32), (s, t)))

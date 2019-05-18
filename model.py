@@ -517,6 +517,9 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
         beam_size = 1
 
     maxlen = tf.reduce_max(maxlens)
+
+    if eos_id is None:
+        eos_id = pad_id
     
     with tf.name_scope('batch_size'):
         batch_size = tf.shape(nest.flatten(init_cache)[0])[0]
