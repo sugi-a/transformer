@@ -45,20 +45,15 @@ def train():
     print('start')
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_dir',
-                        required=True,
+    parser.add_argument('--model_dir', required=True,
                         help='Path to the directory containing `model_config.py`')
-    parser.add_argument('--n_cpu_cores',
-                        default=8,
-                        type=int,
+    parser.add_argument('--n_cpu_cores', default=8, type=int,
                         help='Number of cpu cores used by `tf.data.Dataset.map`')
-    parser.add_argument('--n_gpus',
-                        default=1,
-                        type=int,
+    parser.add_argument('--n_gpus', default=1, type=int,
                         help='Number of GPUs available')
-    parser.add_argument('--central_device_data_parallel',
-                        default='None',
+    parser.add_argument('--central_device_data_parallel', default='None',
                         help='"None" is converted to `None`. Default is "None"')
+    parser.add_argument('--random_seed', default=0, type=int)
     args = parser.parse_args()
     if args.central_device_data_parallel == 'None':
         args.central_device_data_parallel = None
@@ -74,7 +69,8 @@ def train():
     # train dataset
     if Hyperparams.fixed_batch_capacity:
         logger.info('Calling make_dataset_source_target_const_capacity_batch')
-        train_data = dataprocessing.make_dataset_source_target_const_capacity_batch(Config.source_train_tok,
+        train_data = dataprocessing.make_dataset_source_target_const_capacity_batch(
+            Config.source_train_tok,
             Config.target_train_tok,
             Config.vocab_source,
             Config.vocab_target,
@@ -83,8 +79,9 @@ def train():
             PAD_ID=Config.PAD_ID,
             maxlen=Hyperparams.maxlen,
             batch_capacity=Hyperparams.fixed_batch_capacity // args.n_gpus,
-            ncpu=args.n_cpu_cores)
-        train_data = train_data.shuffle(1000 * 200)
+            sort=False,
+            shuffle=True,
+            allow_skip=True)
         train_data = train_data.prefetch(args.n_gpus * 2)
     else:
         train_data = (dataprocessing.make_dataset_source_target(
@@ -126,6 +123,7 @@ def train():
     dev_parallel_inputs = [dev_iterator.get_next() for i in range(args.n_gpus)]
     
     # model
+    tf.set_random_seed(args.random_seed)
     model = Transformer(Hyperparams, Config, name='transformer')
     
     # place variables on device:CPU
