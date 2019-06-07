@@ -322,4 +322,4 @@ class Config:
             with codecs.open(out_file, "w") as f:
                 f.write(output_text)
         else:
-            return output_text.strip().split("\n")
+            return output_text.split("\n")[:-1]

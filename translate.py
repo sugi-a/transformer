@@ -249,7 +249,6 @@ class Inference:
             # candidates: [batch_size, beam_size, length(variable)], scores: [batch_size, beam_size]
             candidates, scores = [sum([array.tolist() for array in arrays], []) for arrays in zip(*run_results)]
 
-        print(candidates)
         return candidates, scores
 
     def do_calc_perplexity(self, dataset, sequence_log_prob=False, session=None, checkpoint=None, reuse_session=True):
