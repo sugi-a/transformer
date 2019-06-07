@@ -124,6 +124,7 @@ class Inference:
             self.beam_candidates_scores = compute_parallel(_beam_search, self.inputs_parallel) # [n_gpus]
 
             # Computation graph for calculation of perplexity
+            self.sequence_log_prob = tf.placeholder(tf.bool, [])
             def _perplexity(inputs):
                 (x, x_len), (y, y_len) = inputs
                 logits = self.model.get_logits(x, y, x_len, y_len, False)
@@ -133,7 +134,9 @@ class Inference:
                 seq_logprobs = tf.batch_gather(logprobs, y[:, :, None]) # [batch, length, 1]
                 seq_logprobs = seq_logprobs[:, :, 0]
                 log_perp = tf.reduce_sum(
-                    seq_logprobs * is_target / tf.reduce_sum(is_target, axis=1, keepdims=True),
+                    tf.cond(self.sequence_log_prob,
+                        lambda: seq_logprobs * is_target,
+                        lambda: seq_logprobs * is_target / tf.reduce_sum(is_target, axis=1, keepdims=True)),
                     axis=1) # [batch]
                 perp = tf.exp(log_perp) # [batch]
                 return perp
@@ -246,9 +249,10 @@ class Inference:
             # candidates: [batch_size, beam_size, length(variable)], scores: [batch_size, beam_size]
             candidates, scores = [sum([array.tolist() for array in arrays], []) for arrays in zip(*run_results)]
 
+        print(candidates)
         return candidates, scores
 
-    def do_calc_perplexity(self, dataset, session=None, checkpoint=None, reuse_session=True):
+    def do_calc_perplexity(self, dataset, sequence_log_prob=False, session=None, checkpoint=None, reuse_session=True):
         """conduct beam search producing results as numpy arrays.
         Args:
             session: `tf.Session` to be used. If `None`, a new one is created and reused.
@@ -279,7 +283,7 @@ class Inference:
             iter_count = 0
             while True:
                 try:
-                    run_results.extend(session.run(self.perplexity))
+                    run_results.extend(session.run(self.perplexity, feed_dict={self.sequence_log_prob: sequence_log_prob}))
                 except tf.errors.OutOfRangeError:
                     break
                 iter_count += 1
@@ -290,7 +294,7 @@ class Inference:
             perp = sum(map(lambda x:x.tolist(), run_results), [])
             return perp
 
-    def do_calc_perplexity_placeholder(self, batches, session=None, checkpoint=None, reuse_session=True):
+    def do_calc_perplexity_placeholder(self, batches, sequence_log_prob=False, session=None, checkpoint=None, reuse_session=True):
         """conduct beam search producing results as list of integers.
         Args:
             session: `tf.Session` to be used. If `None`, a new one is created and reused.
@@ -317,12 +321,15 @@ class Inference:
             start_time = time.time()
             iter_count = 0
             for batch in batches:
-                run_results.extend(session.run(self.perplexity,
+                run_results.extend(session.run(
+                    self.perplexity,
                     feed_dict={
                         self.ph_dict['x']: batch[0][0],
                         self.ph_dict['x_len']: batch[0][1],
                         self.ph_dict['init_y']: batch[1][0],
-                        self.ph_dict['init_y_len']: batch[1][1]}))
+                        self.ph_dict['init_y_len']: batch[1][1],
+                        self.sequence_log_prob: sequence_log_prob}
+                ))
                 iter_count += 1
                 sys.stderr.write('{} sec/step, steps: {}/{}   \r'.format(
                     (time.time() - start_time)/iter_count, iter_count, len(batches)))
@@ -331,7 +338,7 @@ class Inference:
             perp = sum(map(lambda x:x.tolist(), run_results), [])
             return perp
 
-    def calculate_perplexity(self, sources, targets, checkpoint=None, session=None, reuse_session=True):
+    def calculate_perplexity(self, sources, targets, sequence_log_prob=False, checkpoint=None, session=None, reuse_session=True):
         """Calculate the perplexity of the target text given a source text.
         Args:
             sources: [#samples: str]"""
@@ -347,7 +354,7 @@ class Inference:
                 sort=False,
                 allow_skip=False)
 
-            perp = self.do_calc_perplexity(dataset, session, checkpoint, reuse_session)
+            perp = self.do_calc_perplexity(dataset, sequence_log_prob=sequence_log_prob, session=session, checkpoint=checkpoint, reuse_session=reuse_session)
         else:
             batches = dataprocessing.make_batches_source_target_const_capacity_batch_from_list(
                 sources, targets,
@@ -357,7 +364,7 @@ class Inference:
                 sort=False,
                 allow_skip=False)
 
-            perp = self.do_calc_perplexity_placeholder(batches, session, checkpoint, reuse_session)
+            perp = self.do_calc_perplexity_placeholder(batches, sequence_log_prob=sequence_log_prob, session=session, checkpoint=checkpoint, reuse_session=reuse_session)
         return perp 
 
     def translate_sentences(self, texts, beam_size=1, return_search_results=False, checkpoint=None, session=None, reuse_session=True, init_y_texts=None, return_in_subwords=False):
