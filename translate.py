@@ -138,7 +138,7 @@ class Inference:
                         lambda: seq_logprobs * is_target,
                         lambda: seq_logprobs * is_target / tf.reduce_sum(is_target, axis=1, keepdims=True)),
                     axis=1) # [batch]
-                perp = tf.exp(log_perp) # [batch]
+                perp = tf.cond(self.sequence_log_prob, lambda: log_perp, lambda:tf.exp(log_perp))# [batch]
                 return perp
             self.perplexity = compute_parallel(_perplexity, self.inputs_parallel)
 
