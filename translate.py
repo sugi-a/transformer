@@ -523,9 +523,16 @@ def write_BLEU_results_to_file(prefix, sources, score, references, translations)
     assert len(sources) == len(references) == len(translations)
         """
     results_file_name, score_file_name = prefix + '.results', prefix + '.score'
-    with codecs.open(results_file_name, 'w') as r_f, codecs.open(score_file_name, 'w') as s_f:
+    source_f_name, ref_f_name, out_f_name= [prefix + '.' + ext for ext in ['src', 'ref', 'out']]
+    with codecs.open(results_file_name, 'w') as r_f,\
+        codecs.open(score_file_name, 'w') as s_f,\
+        codecs.open(source_f_name, 'w') as src_f,\
+        codecs.open(ref_f_name, 'w') as ref_f,\
+        codecs.open(out_f_name, 'w') as out_f:
         # source \n reference \n translation \n\n
         r_f.writelines(['{}\n{}\n{}\n\n'.format(s, ' '.join(r[0]), ' '.join(t))
             for s,r,t in zip(sources, references, translations)])
         s_f.write(str(score) + '\n')
-
+        src_f.writelines(['{}\n'.format(s) for s in sources])
+        ref_f.writelines(['{}\n'.format(' '.join(r[0])) for r in references])
+        out_f.writelines(['{}\n'.format(' '.join(t)) for t in translations])

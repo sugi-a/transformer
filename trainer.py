@@ -1,8 +1,5 @@
-import os
-import sys
-import codecs
-import argparse
-import time
+import os, sys, codecs, argparse, time
+from pathlib import Path
 from logging import getLogger, StreamHandler, DEBUG, basicConfig
 logger = getLogger(__name__)
 logger.setLevel(DEBUG)
@@ -55,6 +52,7 @@ def train():
     parser.add_argument('--central_device_data_parallel', default='None',
                         help='"None" is converted to `None`. Default is "None"')
     parser.add_argument('--random_seed', default=0, type=int)
+    parser.add_argument('--inherit_no_bleu_improve', default=10, type=int)
     args = parser.parse_args()
     if args.central_device_data_parallel == 'None':
         args.central_device_data_parallel = None
@@ -186,7 +184,7 @@ def train():
         if not os.path.exists(p):
             os.mkdir(p)
 
-    saver = tf.train.Saver(max_to_keep=12)
+    saver = tf.train.Saver(max_to_keep=20)
 
     summary_writer = tf.summary.FileWriter(summary_dir, tf.get_default_graph())
     
@@ -226,39 +224,42 @@ def train():
 
         max_bleu = -100
         no_improvement_count = 0
+        last_check_step = 0
+        # Check the past BLEUs in summary
+        summary_paths = None
+        try:
+            summary_paths = list(map(str, Path(summary_dir).glob('*')))
+        except:
+            logger.info('No existing summary file.')
+        if summary_paths:
+            bleu_record = []
+            for summary_path in summary_paths:
+                summary_itr = tf.train.summary_iterator(summary_path)
+                try:
+                    for e in summary_itr:
+                        for v in e.summary.value:
+                            if v.tag == 'BLEU':
+                                bleu_record.append((e.step, v.simple_value))
+                except:
+                    pass
+            bleu_record.sort(key=lambda x:x[0])
+            for rec in bleu_record:
+                if rec[1] < max_bleu:
+                    no_improvement_count += 1
+                else:
+                    no_improvement_count = 0
+                max_bleu = max(max_bleu, rec[1])
+            no_improvement_count = min(no_improvement_count, args.inherit_no_bleu_improve)
+            logger.info('No improve count succeeded: {}'.format(no_improvement_count))
 
         global_step = sess.run(global_step_var)
 
         # Training epoch loop
         while True:
 
-            # evaluation
-            if hasattr(Config, 'train_time_metric'):
-                # You can define a function `train_time_metric` in model_config.Config
-                # Args:
-                #   inference: instance of Inference
-                #   session: current session whose graph includes inference and the all parameters have been
-                #   loaded.
-                # Returns:
-                #   score (float)
-                logger.info('Evaluating by the custom metric')
-                score = Config.train_time_metric(inference, sess, global_step)
-            else:
-                logger.info('Custom metric was not found.')
-                logger.info('Computing BLEU score')
-                score = inference.BLEU_evaluation(Config.source_dev_tok,
-                                                  Config.target_dev_tok,
-                                                  beam_size=1,
-                                                  session=sess,
-                                                  result_file_prefix=dev_bleu_dir+'/step_{}'.format(global_step))
-            logger.info('Computing BLEU score done. {}'.format(score))
-            no_improvement_count = no_improvement_count + 1 if score < max_bleu else 0
-            max_bleu = max(score, max_bleu)
-            if no_improvement_count > 4:
+            if no_improvement_count >= 10:
+                logger.info('Early stopping.')
                 break
-
-            # add BLEU score to summary
-            summary_writer.add_summary(custom_summary({'BLEU': score}), global_step)
 
             # Initialize train dataset Iterator
             sess.run(train_iterator.initializer)
@@ -272,7 +273,41 @@ def train():
             # Training loop
             while True:
                 try:
-                    if global_step % (200) == 0:
+                    if global_step >= last_check_step + 5000:
+                        last_check_step = global_step
+                        # evaluation
+                        if hasattr(Config, 'train_time_metric'):
+                            # You can define a function `train_time_metric` in model_config.Config
+                            # Args:
+                            #   inference: instance of Inference
+                            #   session: current session whose graph includes inference and the all parameters have been
+                            #   loaded.
+                            # Returns:
+                            #   score (float)
+                            logger.info('Evaluating by the custom metric')
+                            score = Config.train_time_metric(inference, sess, global_step)
+                        else:
+                            logger.info('Custom metric was not found.')
+                            logger.info('Computing BLEU score')
+                            score = inference.BLEU_evaluation(Config.source_dev_tok,
+                                                              Config.target_dev_tok,
+                                                              beam_size=1,
+                                                              session=sess,
+                                                              result_file_prefix=dev_bleu_dir+'/step_{}'.format(global_step))
+                        logger.info('Computing BLEU score done. {}'.format(score))
+                        no_improvement_count = no_improvement_count + 1 if score < max_bleu else 0
+                        if no_improvement_count >= 10:
+                            break
+                        max_bleu = max(score, max_bleu)
+                        # add BLEU score to summary
+                        summary_writer.add_summary(custom_summary({'BLEU': score}), global_step)
+
+                        # Save parameters
+                        logger.info('Saving parameters. Global step: {}, no improvement: {}'.format(global_step, no_improvement_count))
+                        saver.save(sess, checkpoint_dir + '/' + Config.model_name, global_step=global_step)
+
+
+                    if global_step % 400 == 0:
                         train_summary, global_step, _ = sess.run([train_summary_op,
                                                                   global_step_var,
                                                                   train_info['train_op']])
@@ -301,10 +336,6 @@ def train():
                     sys.stderr.write('{} sec/step. local step: {}     \r'.format(sec_per_step, local_step))
                 except tf.errors.OutOfRangeError:
                     break
-
-            # Save parameters
-            logger.info('Saving parameters. Global step: {}'.format(global_step))
-            saver.save(sess, checkpoint_dir + '/' + Config.model_name, global_step=global_step)
 
 if __name__ == '__main__':
     train()
