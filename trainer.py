@@ -52,7 +52,9 @@ def train():
     parser.add_argument('--central_device_data_parallel', default='None',
                         help='"None" is converted to `None`. Default is "None"')
     parser.add_argument('--random_seed', default=0, type=int)
+
     parser.add_argument('--inherit_no_bleu_improve', default=10, type=int)
+
     args = parser.parse_args()
     if args.central_device_data_parallel == 'None':
         args.central_device_data_parallel = None

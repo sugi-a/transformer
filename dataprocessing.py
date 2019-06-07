@@ -178,7 +178,6 @@ def make_batches_from_zipped_list(
                 allow_skip=False):
 
     _start_time = time.time()
-    logger.info('Making batches. #pairs in the original dataset:{}'.format(len(zipped_lines)))
 
     assert not (sort and shuffle)
     if sort:
@@ -232,6 +231,7 @@ Number of batches:{}, time:{}sec'''.format(
     logger.info('Padding batches done. time: {}sec'.format(time.time() - _start_time))
 
     return padded_batches
+    
     
 def make_batches_source_target_const_capacity_batch_from_list(
                 source_list,
