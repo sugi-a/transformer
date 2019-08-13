@@ -178,10 +178,10 @@ def label_smoothing(labels, eps=0.1):
     return (1 - eps) * labels + (eps/tf.cast(tf.shape(labels)[-1], tf.float32))
 
 class BlockWrapper(tf.layers.Layer):
-    def __init__(self, layer, hparams, *args, **kwargs):
+    def __init__(self, layer, params, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.layer = layer
-        self.hparams = hparams
+        self.params = params
 
     def build(self, input_shape):
         # the Layer wrapped by this BlockWrapper must not be built before this BlockWrapper is built
@@ -193,38 +193,39 @@ class BlockWrapper(tf.layers.Layer):
     def call(self, x, *args, training=False, **kwargs):
         y = self.layer_norm(x)
         y = self.layer(y, *args, training=training, **kwargs)
-        y = tf.layers.dropout(y, self.hparams.dropout_rate, training=training)
+        y = tf.layers.dropout(y, self.params["network"]["dropout_rate"], training=training)
         return y + x
 
 class Encoder(tf.layers.Layer):
-    def __init__(self, hparams, *args, **kwargs):
+    def __init__(self, params, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.hparams = hparams
-        self.embedding_layer = Embedding_layer(self.hparams.vocab_size, self.hparams.embed_size)
+        self.params = params
+        self.embedding_layer = Embedding_layer(
+            self.params["network"]["vocab_size"], self.params["network"]["embed_size"])
 
     def build(self, input_shape):
 
         self.blocks = []
-        for i in range(self.hparams.n_blocks):
+        for i in range(self.params["network"]["n_blocks"]):
             layer_name = 'layer_{}'.format(i)
             self.blocks.append((
-                BlockWrapper(SelfAttention(self.hparams.attention_size,
-                                                 self.hparams.n_heads,
-                                                 self.hparams.dropout_rate,
+                BlockWrapper(SelfAttention(self.params["network"]["attention_size"],
+                                                 self.params["network"]["n_heads"],
+                                                 self.params["network"]["dropout_rate"],
                                                  name='{}_{}'.format(layer_name, 'self_attention')),
-                             self.hparams),
-                BlockWrapper(Feedforward(4 * self.hparams.embed_size,
-                                         self.hparams.dropout_rate,
+                             self.params),
+                BlockWrapper(Feedforward(4 * self.params["network"]["embed_size"],
+                                         self.params["network"]["dropout_rate"],
                                          name='{}_{}'.format(layer_name, 'feedforward')),
-                             self.hparams)
+                             self.params)
                         ))
         self.output_norm = Layer_norm()
         super().build(input_shape)
 
     def call(self, inputs, self_attn_bias, training=False):
         outputs = self.embedding_layer(inputs)
-        outputs = outputs + positional_encoding(tf.shape(inputs)[1], self.hparams.embed_size)
-        outputs = tf.layers.dropout(outputs, self.hparams.dropout_rate, training=training)
+        outputs = outputs + positional_encoding(tf.shape(inputs)[1], self.params["network"]["embed_size"])
+        outputs = tf.layers.dropout(outputs, self.params["network"]["dropout_rate"], training=training)
 
         for self_attn, ff in self.blocks:
             outputs = self_attn(outputs, self_attn_bias, training=training)
@@ -233,37 +234,37 @@ class Encoder(tf.layers.Layer):
         return self.output_norm(outputs)
 
 class Decoder(tf.layers.Layer):
-    def __init__(self, hparams, embedding_layer=None, *args, **kwargs):
+    def __init__(self, params, embedding_layer=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.hparams = hparams
+        self.params = params
         self.embedding_layer = embedding_layer
 
     def build(self, input_shape):
         if self.embedding_layer is None:
-            self.embedding_layer = Embedding_layer(self.hparams.vocab_size, self.hparams.embed_size)
+            self.embedding_layer = Embedding_layer(self.params["network"]["vocab_size"], self.params["network"]["embed_size"])
         else:
             # if the embedding layer is owned by another Layer it must be built until now
             # in order to avoid ambiguous variable scope tree
             assert self.embedding_layer.built
         
         self.blocks = []
-        for i in range(self.hparams.n_blocks):
+        for i in range(self.params["network"]["n_blocks"]):
             layer_name = 'layer_{}'.format(i)
             self.blocks.append((
-                BlockWrapper(SelfAttention(self.hparams.attention_size,
-                                                 self.hparams.n_heads,
-                                                 self.hparams.dropout_rate,
+                BlockWrapper(SelfAttention(self.params["network"]["attention_size"],
+                                                 self.params["network"]["n_heads"],
+                                                 self.params["network"]["dropout_rate"],
                                                  name='{}_{}'.format(layer_name, 'self_attention')),
-                             self.hparams),
-                BlockWrapper(Multihead_attention(self.hparams.attention_size,
-                                                 self.hparams.n_heads,
-                                                 self.hparams.dropout_rate,
+                             self.params),
+                BlockWrapper(Multihead_attention(self.params["network"]["attention_size"],
+                                                 self.params["network"]["n_heads"],
+                                                 self.params["network"]["dropout_rate"],
                                                  name='{}_{}'.format(layer_name, 'context_attention')),
-                             self.hparams),
-                BlockWrapper(Feedforward(self.hparams.embed_size * 4,
-                                         self.hparams.dropout_rate,
+                             self.params),
+                BlockWrapper(Feedforward(self.params["network"]["embed_size"] * 4,
+                                         self.params["network"]["dropout_rate"],
                                          name='{}_{}'.format(layer_name, 'feedforward')),
-                             self.hparams)
+                             self.params)
             ))
 
         self.output_norm = Layer_norm()
@@ -280,8 +281,10 @@ class Decoder(tf.layers.Layer):
             seq_end = seq_start + tf.shape(inputs)[1]
 
         outputs = self.embedding_layer(inputs)
-        outputs = outputs + positional_encoding(seq_end, self.hparams.embed_size)[seq_start:]
-        outputs = tf.layers.dropout(outputs, self.hparams.dropout_rate, training=training)
+        outputs = outputs + positional_encoding(
+            seq_end, self.params["network"]["embed_size"])[seq_start:]
+        outputs = tf.layers.dropout(
+            outputs, self.params["network"]["dropout_rate"], training=training)
 
         for i, (self_attn, ctx_attn, ff) in enumerate(self.blocks):
             layer_name = 'layer_{}'.format(i)
@@ -297,17 +300,16 @@ class Decoder(tf.layers.Layer):
 
 
 class Transformer(tf.layers.Layer):
-    def __init__(self, hparams, config, *args, **kwargs):
+    def __init__(self, params, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.hparams = hparams
-        self.config = config
+        self.params = params
 
     def build(self, input_shape):
-        self.encoder = Encoder(self.hparams, name='encoder')
-        if self.hparams.share_embedding: 
-            self.decoder = Decoder(self.hparams, self.encoder.embedding_layer, name='decoder')
+        self.encoder = Encoder(self.params, name='encoder')
+        if self.params["network"]["share_embedding"]: 
+            self.decoder = Decoder(self.params, self.encoder.embedding_layer, name='decoder')
         else:
-            self.decoder = Decoder(self.hparams, name='decoder')
+            self.decoder = Decoder(self.params, name='decoder')
         
         super().build(input_shape)
 
@@ -353,7 +355,7 @@ class Transformer(tf.layers.Layer):
         dec_ctx_attn_bias = enc_self_attn_bias
         # add SOS to the beginning and remove the last token
         batch_size = tf.shape(y)[0]
-        dec_inputs = tf.concat([tf.fill([batch_size, 1], self.config.SOS_ID), y[:, :-1]], axis=1)
+        dec_inputs = tf.concat([tf.fill([batch_size, 1], self.params["vocab"]["SOS_ID"]), y[:, :-1]], axis=1)
         dec_outputs = self.decoder(dec_inputs, enc_outputs, dec_self_attn_bias, dec_ctx_attn_bias, training=training)
         return dec_outputs
 
@@ -382,11 +384,12 @@ class Transformer(tf.layers.Layer):
                 }
 
             batch_size = tf.shape(x)[0]
-            for layer in range(self.hparams.n_blocks):
+            for layer in range(self.params["network"]["n_blocks"]):
                 layer_name = 'layer_{}'.format(layer)
                 with tf.name_scope('cache_{}'.format(layer_name)):
-                    cache[layer_name] = {'k': tf.zeros([batch_size, 0, self.hparams.attention_size]),
-                                         'v': tf.zeros([batch_size, 0, self.hparams.attention_size])}
+                    cache[layer_name] = {
+                        'k': tf.zeros([batch_size, 0, self.params["network"]["attention_size"]]),
+                        'v': tf.zeros([batch_size, 0, self.params["network"]["attention_size"]])}
 
         with tf.name_scope('max_length'):
             maxlens = tf.math.minimum(512, x_len * 2 + 5)
@@ -397,7 +400,7 @@ class Transformer(tf.layers.Layer):
 
         with tf.name_scope('define_init_sequence'):
             with tf.name_scope('default_prefix'):
-                default_prefix = tf.fill([batch_size, 1], self.config.SOS_ID)
+                default_prefix = tf.fill([batch_size, 1], self.params["vocab"]["SOS_ID"])
                 default_len = tf.ones([batch_size], dtype=tf.int32)
             if init_y is not None:
                 assert init_y_len is not None
@@ -405,7 +408,8 @@ class Transformer(tf.layers.Layer):
                 # if init_target_seq's size is 0, use simple SOS initialization
                 with tf.name_scope('custom_prefix'):
                     # Add SOS to the beginning and remove the last token
-                    custom_prefix = tf.pad(init_y, [[0,0], [1,0]], constant_values=self.config.SOS_ID)[:, :-1]
+                    custom_prefix = tf.pad(init_y,
+                        [[0,0], [1,0]], constant_values=self.params["vocab"]["SOS_ID"])[:, :-1]
 
                 no_context = tf.equal(tf.size(init_y), 0)
                 init_dec_inputs = tf.cond(no_context, lambda: default_prefix, lambda: custom_prefix)
@@ -456,9 +460,9 @@ class Transformer(tf.layers.Layer):
                                                      init_dec_inputs_len,
                                                      beam_size,
                                                      maxlens,
-                                                     self.config.EOS_ID,
-                                                     self.config.PAD_ID,
-                                                     self.hparams.length_penalty_a,
+                                                     self.params["vocab"]["EOS_ID"],
+                                                     self.params["vocab"]["PAD_ID"],
+                                                     self.params["test"]["length_penalty_a"],
                                                      sampling_method=sampling_method)
 
         with tf.name_scope('post_check_empty_batch'):

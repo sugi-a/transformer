@@ -173,17 +173,17 @@ def make_batches_from_zipped_list(
                 zipped_lines,
                 PAD_ID,
                 batch_capacity,
-                sort=False,
-                shuffle=False,
+                order_mode=None,
                 allow_skip=False):
 
     _start_time = time.time()
 
-    assert not (sort and shuffle)
-    if sort:
+    if order_mode == 'sort':
         zipped_lines.sort(lambda x: len(x[0]))
-    if shuffle:
+    elif order_mode == 'shuffle':
         zipped_lines = np.random.permutation(zipped_lines)
+    else:
+        assert order_mode is None
 
     batches = []
     s_batch, t_batch, s_lens, t_lens = None, None, None, None
@@ -243,8 +243,7 @@ def make_batches_source_target_const_capacity_batch_from_list(
                 PAD_ID,
                 maxlen,
                 batch_capacity,
-                sort=False,
-                shuffle=False,
+                order_mode=None,
                 allow_skip=True):
     '''
     Args: Mostly the same as make_dataset_source_target.
@@ -271,7 +270,7 @@ def make_batches_source_target_const_capacity_batch_from_list(
 
     # Make batches
     padded_batches = make_batches_from_zipped_list(zipped_list,
-        PAD_ID, batch_capacity, sort, shuffle, allow_skip)
+        PAD_ID, batch_capacity, order_mode, allow_skip)
 
     return padded_batches
 
@@ -285,8 +284,7 @@ def make_dataset_source_target_const_capacity_batch_from_list(
                 PAD_ID,
                 maxlen,
                 batch_capacity,
-                sort=False,
-                shuffle=False,
+                order_mode=None,
                 allow_skip=True):
     '''
     Args: Mostly the same as make_dataset_source_target.
@@ -310,7 +308,7 @@ def make_dataset_source_target_const_capacity_batch_from_list(
     # Make batches
     def gen():
         return make_batches_from_zipped_list(zipped_list,
-            PAD_ID, batch_capacity, sort, shuffle, allow_skip)
+            PAD_ID, batch_capacity, order_mode, allow_skip)
 
     # Make dataset
     dataset = tf.data.Dataset.from_generator(

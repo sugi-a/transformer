@@ -1,4 +1,4 @@
-import os, sys, codecs, argparse, time
+import os, sys, codecs, argparse, time, json
 from pathlib import Path
 from logging import getLogger, StreamHandler, DEBUG, basicConfig
 logger = getLogger(__name__)
@@ -8,10 +8,10 @@ from tensorflow.contrib.framework import nest
 import numpy as np
 np.random.seed(seed=0)
 
-from utils import *
-from model import *
-import dataprocessing
-
+from transformer.utils import *
+from transformer.model import *
+from transformer import dataprocessing
+from transformer.inference import Inference
 
 def get_train_info(y, y_len, dec_outputs):
     """returns loss, accuracy, ntokens"""
@@ -61,59 +61,55 @@ def train():
 
     sys.path.insert(0, args.model_dir)
     import model_config
-    logger.info('model_config has been loaded from {}'.format(model_config.__file__))
-    from model_config import Hyperparams
-    from model_config import Config
-
-    from translate import Inference
+    params = model_config.params
 
     # train dataset
-    if Hyperparams.fixed_batch_capacity:
+    if params["train"]["batch"]["fixed_capacity"]:
         logger.info('Calling make_dataset_source_target_const_capacity_batch')
         train_data = dataprocessing.make_dataset_source_target_const_capacity_batch(
-            Config.source_train_tok,
-            Config.target_train_tok,
-            Config.vocab_source,
-            Config.vocab_target,
-            UNK_ID=Config.UNK_ID,
-            EOS_ID=Config.EOS_ID,
-            PAD_ID=Config.PAD_ID,
-            maxlen=Hyperparams.maxlen,
-            batch_capacity=Hyperparams.fixed_batch_capacity // args.n_gpus,
-            sort=False,
-            shuffle=True,
+            params["train"]["data"]["source_train"],
+            params["train"]["data"]["target_train"],
+            params["vocab"]["source_dict"],
+            params["vocab"]["target_dict"],
+            UNK_ID=params["vocab"]["UNK_ID"],
+            EOS_ID=params["vocab"]["EOS_ID"],
+            PAD_ID=params["vocab"]["PAD_ID"],
+            maxlen=params["train"]["data"]["maxlen"],
+            batch_capacity=params["train"]["batch"]["capacity"] // args.n_gpus,
+            order_mode='sort' if params["train"]["batch"]["sort"] else None,
             allow_skip=True)
         train_data = train_data.prefetch(args.n_gpus * 2)
     else:
         train_data = (dataprocessing.make_dataset_source_target(
-                        Config.source_train_tok,
-                        Config.target_train_tok,
-                        Config.vocab_source,
-                        Config.vocab_target,
-                        UNK_ID=Config.UNK_ID,
-                        EOS_ID=Config.EOS_ID,
+                        params["train"]["data"]["source_train"],
+                        params["train"]["data"]["target_train"],
+                        params["vocab"]["source_dict"],
+                        params["vocab"]["target_dict"],
+                        UNK_ID=params["vocab"]["UNK_ID"],
+                        EOS_ID=params["vocab"]["EOS_ID"],
                         shuffle_size=2000*1000,
                         ncpu=args.n_cpu_cores)
-            .filter(lambda x,y: tf.logical_and(tf.greater(Hyperparams.maxlen, x[1]),
-                                             tf.greater(Hyperparams.maxlen, y[1])))
-            .padded_batch(Hyperparams.batch_size // args.n_gpus,
-                          (([None], []), ([None], [])),
-                          ((Config.PAD_ID, 0), (Config.PAD_ID, 0)))
+            .filter(lambda x,y: tf.logical_and(
+                tf.greater(params["train"]["data"]["maxlen"], x[1]),
+                tf.greater(params["train"]["data"]["maxlen"], y[1])))
+            .padded_batch(params["train"]["batch"]["size"] // args.n_gpus,
+                  (([None], []), ([None], [])),
+                  ((params["vocab"]["PAD_ID"], 0), (params["vocab"]["PAD_ID"], 0)))
             .prefetch(args.n_gpus * 2))
 
     # dev dataset
     dev_data = dataprocessing.make_dataset_source_target(
-                    Config.source_dev_tok,
-                    Config.target_dev_tok,
-                    Config.vocab_source,
-                    Config.vocab_target,
-                    UNK_ID=Config.UNK_ID,
-                    EOS_ID=Config.EOS_ID,
+                    params["train"]["data"]["source_dev"],
+                    params["train"]["data"]["target_dev"],
+                    params["vocab"]["source_dict"],
+                    params["vocab"]["target_dict"],
+                    UNK_ID=params["vocab"]["UNK_ID"],
+                    EOS_ID=params["vocab"]["EOS_ID"],
                     ncpu=args.n_cpu_cores
                 )\
-        .padded_batch(model_config.Hyperparams.batch_size // args.n_gpus,
+        .padded_batch(params["train"]["batch"]["size"] // args.n_gpus,
                       (([None], []), ([None], [])),
-                      ((Config.PAD_ID, 0), (Config.PAD_ID, 0)))\
+                      ((params["vocab"]["PAD_ID"], 0), (params["vocab"]["PAD_ID"], 0)))\
         .prefetch(args.n_gpus * 2)
 
     # train/dev iterators and input tensors
@@ -125,7 +121,7 @@ def train():
     
     # model
     tf.set_random_seed(args.random_seed)
-    model = Transformer(Hyperparams, Config, name='transformer')
+    model = Transformer(params, name='transformer')
     
     # place variables on device:CPU
     with tf.device(args.central_device_data_parallel):
@@ -133,7 +129,7 @@ def train():
 
     # train ops and info
     global_step_var = tf.train.get_or_create_global_step()
-    lr = get_learning_rate(global_step_var, Hyperparams.warm_up_step, Hyperparams.embed_size)
+    lr = get_learning_rate(global_step_var, params["train"]["warm_up_step"], params["network"]["embed_size"])
     optimizer = tf.train.AdamOptimizer(lr)
     train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=model.scope_name)
 
@@ -179,10 +175,10 @@ def train():
     inference = Inference(model, n_gpus=args.n_gpus, n_cpu_cores=args.n_cpu_cores)
 
     # Saver and Summary
-    summary_dir = Config.logdir + '/summary'
-    checkpoint_dir = Config.logdir + '/checkpoint'
-    dev_bleu_dir = Config.logdir + '/dev_bleu_log'
-    for p in [Config.logdir, summary_dir, checkpoint_dir, dev_bleu_dir]:
+    summary_dir = params["train"]["logdir"] + '/summary'
+    checkpoint_dir = params["train"]["logdir"] + '/checkpoint'
+    dev_bleu_dir = params["train"]["logdir"] + '/dev_bleu_log'
+    for p in [summary_dir, checkpoint_dir, dev_bleu_dir]:
         if not os.path.exists(p):
             os.mkdir(p)
 
@@ -278,8 +274,8 @@ def train():
                     if global_step >= last_check_step + 5000:
                         last_check_step = global_step
                         # evaluation
-                        if hasattr(Config, 'train_time_metric'):
-                            # You can define a function `train_time_metric` in model_config.Config
+                        if hasattr(model_config, 'validation_metric'):
+                            # You can define a function `train_time_metric` in model_config
                             # Args:
                             #   inference: instance of Inference
                             #   session: current session whose graph includes inference and the all parameters have been
@@ -287,26 +283,29 @@ def train():
                             # Returns:
                             #   score (float)
                             logger.info('Evaluating by the custom metric')
-                            score = Config.train_time_metric(inference, sess, global_step)
+                            score = model_config.validation_metric(global_step, inference)
                         else:
                             logger.info('Custom metric was not found.')
-                            logger.info('Computing BLEU score')
-                            score = inference.BLEU_evaluation(Config.source_dev_tok,
-                                                              Config.target_dev_tok,
-                                                              beam_size=1,
-                                                              session=sess,
-                                                              result_file_prefix=dev_bleu_dir+'/step_{}'.format(global_step))
-                        logger.info('Computing BLEU score done. {}'.format(score))
+                            
+                            # negative loss on development data as score
+                            sess.run(dev_info_avg.init_op)
+                            sess.run(dev_iterator.initializer)
+                            while True:
+                                try:
+                                    sess.run(dev_info_avg.update_op)
+                                except tf.errors.OutOfRangeError:
+                                    break
+                            score = sess.run(dev_info_avg.average['loss'])
                         no_improvement_count = no_improvement_count + 1 if score < max_bleu else 0
                         if no_improvement_count >= 10:
                             break
                         max_bleu = max(score, max_bleu)
                         # add BLEU score to summary
-                        summary_writer.add_summary(custom_summary({'BLEU': score}), global_step)
+                        summary_writer.add_summary(custom_summary({'dev score': score}), global_step)
 
                         # Save parameters
                         logger.info('Saving parameters. Global step: {}, no improvement: {}'.format(global_step, no_improvement_count))
-                        saver.save(sess, checkpoint_dir + '/' + Config.model_name, global_step=global_step)
+                        saver.save(sess, checkpoint_dir + '/model', global_step=global_step)
 
 
                     if global_step % 400 == 0:
