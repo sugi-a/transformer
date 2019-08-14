@@ -134,9 +134,6 @@ def make_source_target_zipped_list(
 
     # Read lines from the source/target file and zip
     # [dataset size: ([source length: str], [target length: str])]
-    if type(source_list) == 'str': source_list = [source_list]
-    if type(target_list) == 'str': target_list = [target_list]
-    assert len(source_list) == len(target_list)
     zipped_lines = [(sl.strip().split(' '), tl.strip().split(' ')) for sl,tl in zip(source_list, target_list)]
 
     # Make batches
@@ -310,9 +307,6 @@ def make_dataset_source_target_const_capacity_batch_from_list(
     logger.info('make_dataset_source_target_const_capacity_batch_from_list')
     assert maxlen <= batch_capacity
 
-    if type(source_list) == 'str': source_list = [source_list]
-    if type(target_list) == 'str': target_list = [target_list]
-    assert len(source_list) == len(target_list)
     zipped_list = make_source_target_zipped_list(source_list, target_list,
         source_vocab_file_name, target_vocab_file_name,
         UNK_ID, EOS_ID, PAD_ID, maxlen, allow_skip)

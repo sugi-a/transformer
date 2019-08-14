@@ -11,7 +11,7 @@ np.random.seed(seed=0)
 from transformer.utils import *
 from transformer.model import *
 from transformer import dataprocessing
-from transformer.inference import Inference
+from inference import Inference
 
 def get_train_info(y, y_len, dec_outputs):
     """returns loss, accuracy, ntokens"""
@@ -62,7 +62,8 @@ def train():
     sys.path.insert(0, args.model_dir)
     import model_config
     params = model_config.params
-    with codecs.open(params["train"]["logdir"] + '/config.json', 'w') as f:
+    logdir = args.model_dir + '/log'; os.makedirs(logdir)
+    with codecs.open(logdir + '/config.json', 'w') as f:
         json.dump(params, f, ensure_ascii=False, indent=4)
 
     # train dataset
@@ -187,9 +188,9 @@ def train():
     inference = Inference(model_config, model, n_gpus=args.n_gpus, n_cpu_cores=args.n_cpu_cores)
 
     # Saver and Summary directories
-    summary_dir = params["train"]["logdir"] + '/summary'
-    checkpoint_dir = params["train"]["logdir"] + '/checkpoint'
-    sup_checkpoint_dir = params["train"]["logdir"] + '/sup_checkpoint'
+    summary_dir = logdir + '/summary'
+    checkpoint_dir = logdir + '/checkpoint'
+    sup_checkpoint_dir = logdir + '/sup_checkpoint'
     for p in [summary_dir, checkpoint_dir, sup_checkpoint_dir]:
         if not os.path.exists(p):
             os.mkdir(p)
@@ -285,7 +286,7 @@ def train():
                 should_stop = stop_test(epoch, global_step, max_epoch, max_step)
                 if should_stop: break
                 try:
-                    if global_step % 1500 == 0:
+                    if global_step % 2000 == 0:
                         # validation
                         if hasattr(model_config, 'validation_metric'):
                             logger.info('Evaluating by the custom metric')
@@ -326,7 +327,7 @@ def train():
                         last_save_step = global_step
 
 
-                    if global_step % 400 == 0:
+                    if global_step % 500 == 0:
 
                         train_summary, global_step, _ = sess.run([train_summary_op,
                                                                   global_step_var,

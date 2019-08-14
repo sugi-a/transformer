@@ -5,9 +5,9 @@ import numpy as np
 from logging import getLogger, StreamHandler, DEBUG
 logger = getLogger('Translator'); logger.setLevel(DEBUG)
 
-from .model import *
-from .utils import *
-from . import dataprocessing
+from transformer.model import *
+from transformer.utils import *
+from transformer import dataprocessing
 
 class Inference:
     def __init__(self, model_config, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=8, batch_capacity=None, sampling_method=None):
@@ -30,16 +30,17 @@ class Inference:
         # decode ids into subwords
         if hasattr(model_config, 'IDs2tokens'):
             self.IDs2tokens = model_config.IDs2tokens
-            logger.debug('Inference loaded a custom IDs2token')
+            logger.debug('Inference loaded a custom IDs2tokens')
         else:
             self.PAD_ID = params["vocab"]["PAD_ID"]
             self.EOS_ID = params["vocab"]["EOS_ID"]
             self.SOS_ID = params["vocab"]["SOS_ID"]
+            self.UNK_ID = params["vocab"]["UNK_ID"]
             with codecs.open(params["vocab"]["target_dict"]) as f:
                 word_list = [line.split()[0] for line in f]
             self.target_dict = {id: word for id, word in enumerate(word_list)}
             self.target_dict[params["vocab"]["UNK_ID"]] = '#'
-            logger.debug('Inference uses the default IDs2token')
+            logger.debug('Inference uses the default IDs2tokens')
         
         if model is None:
             if graph is None:
@@ -155,7 +156,7 @@ class Inference:
         start_time = time.time()
         iter_count = 0
         for batch in batches:
-            run_results.extend(session.run(self.beam_candidates_scores,
+            run_results.extend(self.session.run(self.beam_candidates_scores,
                 feed_dict={
                     self.beam_size_ph: beam_size,
                     self.ph_dict['x']: batch[0][0],
@@ -222,7 +223,7 @@ class Inference:
             batch_capacity=batch_capacity,
             allow_skip=False)
 
-        perp = self.do_calc_perplexity_placeholder(batches, sequence_log_prob=sequence_log_prob)
+        perp = self.do_calc_perplexity(batches, sequence_log_prob=sequence_log_prob)
         return perp 
 
     def translate_sentences(self, texts, beam_size=1, return_search_results=False, init_y_texts=None):
@@ -263,7 +264,7 @@ class Inference:
             batch_capacity=batch_capacity,
             allow_skip=False)
 
-        candidates, scores = self.do_beam_search_placeholder(batches, beam_size)
+        candidates, scores = self.do_beam_search(batches, beam_size)
 
 
         if return_search_results:
@@ -280,6 +281,54 @@ class Inference:
             # take top 1
             candidates = [beam[0] for beam in candidates] # [nsamples, length(variable)]
             # convert to string
-            candidates = IDs2text(candidates) #[nsamples]
+            candidates = self.IDs2tokens(candidates) #[nsamples]
 
             return candidates
+
+def main():
+    # keys
+    TRANSLATE = 'translate'
+    PERPLEXITY = 'perplexity'
+
+    # arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_dir', type=str, required=True)
+    parser.add_argument('--mode', type=str, default=TRANSLATE)
+    parser.add_argument('--n_gpus', type=int, default=1)
+    parser.add_argument('--n_cpu_cores', type=int, default=None)
+    parser.add_argument('--sampling_method', type=str, default=None)
+    parser.add_argument('--checkpoint', type=str, default=None)
+    parser.add_argument('--batch_capacity', type=int, default=None)
+    parser.add_argument('--context_delimiter', type=str, default=None)
+    parser.add_argument('--beam_size', type=int, default=1)
+    args = parser.parse_args()
+    
+    sys.path.insert(0, args.model_dir)
+    import model_config
+    params = model_config.params
+    
+    # checkpoint
+    checkpoint = args.checkpoint or tf.train.latest_checkpoint(args.model_dir + '/log/sup_checkpoint')
+    assert checkpoint is not None; logger.debug('checkpoint', checkpoint)
+
+    # batch_capacity (specified or decided according to n_gpus)
+    batch_capacity = args.batch_capacity or 64*128*args.n_gpus
+
+    inference = Inference(
+        model_config, checkpoint=checkpoint, n_gpus=args.n_gpus,
+        batch_capacity=args.batch_capacity, sampling_method=args.sampling_method)
+    inference.make_session()
+
+    if args.mode == TRANSLATE:
+        if args.context_delimiter is not None:
+            x, y = zip(*(line.split(args.context_delimiter) for line in sys.stdin))
+            for line in inference.translate_sentences(x, args.beam_size, init_y_texts=y):
+                print(line)
+        else:
+            x = [line.strip() for line in sys.stdin]
+            for line in inference.translate_sentences(x, args.beam_size):
+                print(line)
+
+
+if __name__ == '__main__':
+    main()

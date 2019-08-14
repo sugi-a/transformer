@@ -30,7 +30,6 @@ params = {
             "source_dev": "",
             "target_dev": ""
         },
-        "logdir": ""
     },
     "test": {
         "length_penalty_a": 1.0
