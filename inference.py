@@ -31,16 +31,16 @@ class Inference:
         if hasattr(model_config, 'IDs2tokens'):
             self.IDs2tokens = model_config.IDs2tokens
             logger.debug('Inference loaded a custom IDs2tokens')
-        else:
-            self.PAD_ID = params["vocab"]["PAD_ID"]
-            self.EOS_ID = params["vocab"]["EOS_ID"]
-            self.SOS_ID = params["vocab"]["SOS_ID"]
-            self.UNK_ID = params["vocab"]["UNK_ID"]
-            with codecs.open(params["vocab"]["target_dict"]) as f:
-                word_list = [line.split()[0] for line in f]
-            self.target_dict = {id: word for id, word in enumerate(word_list)}
-            self.target_dict[params["vocab"]["UNK_ID"]] = '#'
-            logger.debug('Inference uses the default IDs2tokens')
+
+        self.PAD_ID = params["vocab"]["PAD_ID"]
+        self.EOS_ID = params["vocab"]["EOS_ID"]
+        self.SOS_ID = params["vocab"]["SOS_ID"]
+        self.UNK_ID = params["vocab"]["UNK_ID"]
+        with codecs.open(params["vocab"]["target_dict"]) as f:
+            word_list = [line.split()[0] for line in f]
+        self.target_dict = {id: word for id, word in enumerate(word_list)}
+        self.target_dict[params["vocab"]["UNK_ID"]] = '#'
+        logger.debug('Inference uses the default IDs2tokens')
         
         if model is None:
             if graph is None:
