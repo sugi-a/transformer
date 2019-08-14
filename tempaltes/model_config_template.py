@@ -20,7 +20,8 @@ params = {
             },
             "early_stopping":{
                 "type": "step", # "step" or "epoch"
-                "n": 30000
+                "n": 15000,
+                "test_period": 1500
             }
         },
         "data": {

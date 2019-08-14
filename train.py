@@ -62,7 +62,7 @@ def train():
     sys.path.insert(0, args.model_dir)
     import model_config
     params = model_config.params
-    logdir = args.model_dir + '/log'; os.makedirs(logdir)
+    logdir = args.model_dir + '/log'; os.makedirs(logdir, exist_ok=True)
     with codecs.open(logdir + '/config.json', 'w') as f:
         json.dump(params, f, ensure_ascii=False, indent=4)
 
@@ -286,7 +286,7 @@ def train():
                 should_stop = stop_test(epoch, global_step, max_epoch, max_step)
                 if should_stop: break
                 try:
-                    if global_step % 2000 == 0:
+                    if global_step % params["train"]["stop"]["early_stopping"]["test_period"] == 0:
                         # validation
                         if hasattr(model_config, 'validation_metric'):
                             logger.info('Evaluating by the custom metric')
