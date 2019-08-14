@@ -30,6 +30,7 @@ class Inference:
         # decode ids into subwords
         if hasattr(model_config, 'IDs2tokens'):
             self.IDs2tokens = model_config.IDs2tokens
+            logger.debug('Inference loaded a custom IDs2token')
         else:
             self.PAD_ID = params["vocab"]["PAD_ID"]
             self.EOS_ID = params["vocab"]["EOS_ID"]
@@ -38,6 +39,7 @@ class Inference:
                 word_list = [line.split()[0] for line in f]
             self.target_dict = {id: word for id, word in enumerate(word_list)}
             self.target_dict[params["vocab"]["UNK_ID"]] = '#'
+            logger.debug('Inference uses the default IDs2token')
         
         if model is None:
             if graph is None:
@@ -220,7 +222,7 @@ class Inference:
             batch_capacity=batch_capacity,
             allow_skip=False)
 
-            perp = self.do_calc_perplexity_placeholder(batches, sequence_log_prob=sequence_log_prob)
+        perp = self.do_calc_perplexity_placeholder(batches, sequence_log_prob=sequence_log_prob)
         return perp 
 
     def translate_sentences(self, texts, beam_size=1, return_search_results=False, init_y_texts=None):

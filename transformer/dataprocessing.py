@@ -134,6 +134,9 @@ def make_source_target_zipped_list(
 
     # Read lines from the source/target file and zip
     # [dataset size: ([source length: str], [target length: str])]
+    if type(source_list) == 'str': source_list = [source_list]
+    if type(target_list) == 'str': target_list = [target_list]
+    assert len(source_list) == len(target_list)
     zipped_lines = [(sl.strip().split(' '), tl.strip().split(' ')) for sl,tl in zip(source_list, target_list)]
 
     # Make batches
@@ -179,7 +182,7 @@ def make_batches_from_zipped_list(
     _start_time = time.time()
 
     if order_mode == 'sort':
-        zipped_lines.sort(lambda x: len(x[0]))
+        zipped_lines.sort(key=lambda x: len(x[0]))
     elif order_mode == 'shuffle':
         zipped_lines = np.random.permutation(zipped_lines)
     else:
@@ -230,6 +233,9 @@ Number of batches:{}, time:{}sec'''.format(
         padded_batches.append(((padded_s_batch, s_lens), (padded_t_batch, t_lens)))
     logger.info('Padding batches done. time: {}sec'.format(time.time() - _start_time))
 
+    if order_mode == 'sort':
+        logger.debug('permutation of sorted batches')
+        np.random.shuffle(padded_batches)
     return padded_batches
     
     
@@ -264,6 +270,9 @@ def make_batches_source_target_const_capacity_batch_from_list(
 
     assert maxlen <= batch_capacity
 
+    if type(source_list) == 'str': source_list = [source_list]
+    if type(target_list) == 'str': target_list = [target_list]
+    assert len(source_list) == len(target_list)
     zipped_list = make_source_target_zipped_list(source_list, target_list,
         source_vocab_file_name, target_vocab_file_name,
         UNK_ID, EOS_ID, PAD_ID, maxlen, allow_skip)
@@ -301,6 +310,9 @@ def make_dataset_source_target_const_capacity_batch_from_list(
     logger.info('make_dataset_source_target_const_capacity_batch_from_list')
     assert maxlen <= batch_capacity
 
+    if type(source_list) == 'str': source_list = [source_list]
+    if type(target_list) == 'str': target_list = [target_list]
+    assert len(source_list) == len(target_list)
     zipped_list = make_source_target_zipped_list(source_list, target_list,
         source_vocab_file_name, target_vocab_file_name,
         UNK_ID, EOS_ID, PAD_ID, maxlen, allow_skip)

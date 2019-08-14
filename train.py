@@ -62,6 +62,8 @@ def train():
     sys.path.insert(0, args.model_dir)
     import model_config
     params = model_config.params
+    with codecs.open(params["train"]["logdir"] + '/config.json', 'w') as f:
+        json.dump(params, f, ensure_ascii=False, indent=4)
 
     # train dataset
     if params["train"]["batch"]["fixed_capacity"]:
@@ -76,7 +78,7 @@ def train():
             PAD_ID=params["vocab"]["PAD_ID"],
             maxlen=params["train"]["data"]["maxlen"],
             batch_capacity=params["train"]["batch"]["capacity"] // args.n_gpus,
-            order_mode='sort' if params["train"]["batch"]["sort"] else None,
+            order_mode='sort' if params["train"]["batch"]["sort"] else "shuffle",
             allow_skip=True)
         train_data = train_data.prefetch(args.n_gpus * 2)
     else:
@@ -171,18 +173,30 @@ def train():
                                                             averaging_device=args.central_device_data_parallel)
     dev_info_avg = CumulativeAverage(dev_info, dev_ntokens, name='dev_info_avg')
 
-    # For BLEU evaluation
-    inference = Inference(model, n_gpus=args.n_gpus, n_cpu_cores=args.n_cpu_cores)
+    # epoch variable
+    epoch_var = tf.get_variable('epoch', dtype=tf.int32, initializer=0)
+    epoch_var_ph = tf.placeholder(tf.int32, [])
+    epoch_var_setter = epoch_var.assign(epoch_var_ph)
 
-    # Saver and Summary
+    # validation score variable
+    score_var = tf.get_variable('dev_score', dtype=tf.float32, initializer=-1e20)
+    score_var_ph = tf.placeholder(tf.float32, [])
+    score_var_setter = score_var.assign(score_var_ph)
+
+    # For BLEU evaluation
+    inference = Inference(model_config, model, n_gpus=args.n_gpus, n_cpu_cores=args.n_cpu_cores)
+
+    # Saver and Summary directories
     summary_dir = params["train"]["logdir"] + '/summary'
     checkpoint_dir = params["train"]["logdir"] + '/checkpoint'
-    dev_bleu_dir = params["train"]["logdir"] + '/dev_bleu_log'
-    for p in [summary_dir, checkpoint_dir, dev_bleu_dir]:
+    sup_checkpoint_dir = params["train"]["logdir"] + '/sup_checkpoint'
+    for p in [summary_dir, checkpoint_dir, sup_checkpoint_dir]:
         if not os.path.exists(p):
             os.mkdir(p)
 
-    saver = tf.train.Saver(max_to_keep=20)
+    # Savers. sup_saver is the one to save parameters with good results
+    saver = tf.train.Saver(max_to_keep=5)
+    sup_saver = tf.train.Saver(max_to_keep=5)
 
     summary_writer = tf.summary.FileWriter(summary_dir, tf.get_default_graph())
     
@@ -213,51 +227,48 @@ def train():
         logger.info('Initialization done.')
 
         # loading checkpoint
+        # checkpoint with the best score
+        latest_sup_checkpoint = tf.train.latest_checkpoint(sup_checkpoint_dir)
+        max_step, max_epoch, max_score = 1e10, 1e10, -1e10
+        if latest_sup_checkpoint is not None:
+            sup_saver.restore(sess, latest_sup_checkpoint)
+            max_step, max_epoch = sess.run((global_step_var, epoch_var))
+            max_score = sess.run(score_var)
+
+        # latest checkpoint
         latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
         if latest_checkpoint is not None:
             logger.info('Checkpoint was found: {}'.format(latest_checkpoint))
             saver.restore(sess, latest_checkpoint)
+            global_step, epoch = sess.run((global_step_var, epoch_var))
+            last_save_step = global_step
         else:
             logger.info('No checkpoint was found. Training starts from the beginning.')
+            global_step, epoch, max_score = sess.run((global_step_var, epoch_var, score_var))
 
-        max_bleu = -100
-        no_improvement_count = 0
-        last_check_step = 0
-        # Check the past BLEUs in summary
-        summary_paths = None
-        try:
-            summary_paths = list(map(str, Path(summary_dir).glob('*')))
-        except:
-            logger.info('No existing summary file.')
-        if summary_paths:
-            bleu_record = []
-            for summary_path in summary_paths:
-                summary_itr = tf.train.summary_iterator(summary_path)
-                try:
-                    for e in summary_itr:
-                        for v in e.summary.value:
-                            if v.tag == 'BLEU':
-                                bleu_record.append((e.step, v.simple_value))
-                except:
-                    pass
-            bleu_record.sort(key=lambda x:x[0])
-            for rec in bleu_record:
-                if rec[1] < max_bleu:
-                    no_improvement_count += 1
-                else:
-                    no_improvement_count = 0
-                max_bleu = max(max_bleu, rec[1])
-            no_improvement_count = min(no_improvement_count, args.inherit_no_bleu_improve)
-            logger.info('No improve count succeeded: {}'.format(no_improvement_count))
+        def stop_test(epoch, step, max_epoch, max_step):
+            conf = params["train"]["stop"]
+            if conf["limit"]["type"] == "epoch" and conf["limit"]["n"] < epoch:
+                    logger.info('stop for the epoch limit'); return True
+            if conf["limit"]["type"] == "step" and conf["limit"]["n"] < step:
+                logger.info('stop for the step limit'); return True
 
-        global_step = sess.run(global_step_var)
+            conf = conf["early_stopping"]
+            if conf["type"] == "epoch" and conf["n"] < epoch - max_epoch:
+                logger.info('Early stopping by epoch limit') ; return True
+            elif conf["type"] == "step" and conf["n"] < step - max_step:
+                logger.info('Early stopping by global step limit'); return True
 
+        logger.debug('{},{},{},{}'.format(epoch, global_step, max_epoch, max_step))
         # Training epoch loop
-        while True:
+        should_stop = False
+        while not should_stop:
+            epoch += 1
+            sess.run(epoch_var_setter, feed_dict={epoch_var_ph: epoch})
 
-            if no_improvement_count >= 10:
-                logger.info('Early stopping.')
-                break
+            # stop test
+            should_stop = stop_test(epoch, global_step, max_epoch, max_step)
+            if should_stop: break
 
             # Initialize train dataset Iterator
             sess.run(train_iterator.initializer)
@@ -269,19 +280,14 @@ def train():
 
             logger.info('New epoch starts.')
             # Training loop
-            while True:
+            while not should_stop:
+                # check step limit
+                should_stop = stop_test(epoch, global_step, max_epoch, max_step)
+                if should_stop: break
                 try:
-                    if global_step >= last_check_step + 5000:
-                        last_check_step = global_step
-                        # evaluation
+                    if global_step % 1500 == 0:
+                        # validation
                         if hasattr(model_config, 'validation_metric'):
-                            # You can define a function `train_time_metric` in model_config
-                            # Args:
-                            #   inference: instance of Inference
-                            #   session: current session whose graph includes inference and the all parameters have been
-                            #   loaded.
-                            # Returns:
-                            #   score (float)
                             logger.info('Evaluating by the custom metric')
                             score = model_config.validation_metric(global_step, inference)
                         else:
@@ -295,20 +301,33 @@ def train():
                                     sess.run(dev_info_avg.update_op)
                                 except tf.errors.OutOfRangeError:
                                     break
-                            score = sess.run(dev_info_avg.average['loss'])
-                        no_improvement_count = no_improvement_count + 1 if score < max_bleu else 0
-                        if no_improvement_count >= 10:
-                            break
-                        max_bleu = max(score, max_bleu)
-                        # add BLEU score to summary
+                            score = - sess.run(dev_info_avg.average['loss'])
+                        # store score into score variable
+                        sess.run(score_var_setter, feed_dict={score_var_ph: score})
+
+                        if score > max_score:
+                            max_step = global_step
+                            max_epoch = epoch
+                            max_score = score
+
+                            # save superior checkpoint
+                            sup_saver.save(sess, sup_checkpoint_dir + '/model', global_step=global_step)
+
+                        should_stop = stop_test(epoch, global_step, max_epoch, max_step)
+                        if should_stop: break
+
+                        # add score to summary
                         summary_writer.add_summary(custom_summary({'dev score': score}), global_step)
 
                         # Save parameters
-                        logger.info('Saving parameters. Global step: {}, no improvement: {}'.format(global_step, no_improvement_count))
+                        logger.info('Saving parameters. Global step: {}, no improvement: {}'
+                            .format(global_step, global_step - max_step))
                         saver.save(sess, checkpoint_dir + '/model', global_step=global_step)
+                        last_save_step = global_step
 
 
                     if global_step % 400 == 0:
+
                         train_summary, global_step, _ = sess.run([train_summary_op,
                                                                   global_step_var,
                                                                   train_info['train_op']])
@@ -330,6 +349,7 @@ def train():
                     else:
                         global_step, _ = sess.run([global_step_var, train_info['train_op']])
 
+                    # calculate time
                     local_step += 1
                     _ = step_time
                     step_time = time.time()
@@ -337,6 +357,13 @@ def train():
                     sys.stderr.write('{} sec/step. local step: {}     \r'.format(sec_per_step, local_step))
                 except tf.errors.OutOfRangeError:
                     break
+        # last parameter save
+        if last_save_step != global_step:
+            logger.info('saving parameters on finishing training')
+            saver.save(sess, checkpoint_dir + '/model', global_step=global_step)
+            last_save_step = global_step
+
+
 
 if __name__ == '__main__':
     train()

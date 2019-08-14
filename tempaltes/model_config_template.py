@@ -14,9 +14,14 @@ params = {
         },
         "warm_up_step": 4000,
         "stop": {
-            "type": "step", # "step", "epoch", "early_stopping"
-            "max": 300,
-            "wait_steps": 40000 # if "type"=="early_stopping", training stops when validation score hasn't improve for this amount of steps.
+            "limit":{
+                "type": "step", # "step" or "epoch"
+                "n": 300000
+            },
+            "early_stopping":{
+                "type": "step", # "step" or "epoch"
+                "n": 30000
+            }
         },
         "data": {
             "maxlen": 64,
