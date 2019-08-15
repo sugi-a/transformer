@@ -119,7 +119,6 @@ class Inference:
     def make_session(self, sess=None, checkpoint=None, reuse_session=True):
         if sess is not None:
             assert sess.graph is self.graph
-            if self.session: self.session.close()
             self.session = sess
         else:
             if reuse_session and self.session:

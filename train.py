@@ -222,6 +222,9 @@ def train():
     with tf.Session(config=sess_config) as sess:
         logger.info('Session started.')
 
+        # set inference's session
+        inference.make_session(sess)
+
         # initialization
         logger.info('Initializing.')
         sess.run(init_op)
