@@ -263,9 +263,9 @@ def train():
             elif conf["type"] == "step" and conf["n"] < step - max_step:
                 logger.info('Early stopping by global step limit'); return True
 
-        logger.debug('{},{},{},{}'.format(epoch, global_step, max_epoch, max_step))
         # Training epoch loop
         should_stop = False
+        last_check_step = max_step
         while not should_stop:
             epoch += 1
             sess.run(epoch_var_setter, feed_dict={epoch_var_ph: epoch})
@@ -289,7 +289,7 @@ def train():
                 should_stop = stop_test(epoch, global_step, max_epoch, max_step)
                 if should_stop: break
                 try:
-                    if global_step % params["train"]["stop"]["early_stopping"]["test_period"] == 0:
+                    if global_step % params["train"]["stop"]["early_stopping"]["test_period"] == 0 and global_step != last_check_step:
                         # validation
                         if hasattr(model_config, 'validation_metric'):
                             logger.info('Evaluating by the custom metric')
@@ -332,9 +332,9 @@ def train():
 
                     if global_step % 500 == 0:
 
-                        train_summary, global_step, _ = sess.run([train_summary_op,
-                                                                  global_step_var,
-                                                                  train_info['train_op']])
+                        _, train_summary, global_step = sess.run([train_info['train_op'],
+                                                                train_summary_op,
+                                                                global_step_var])
 
                         # write summary of train data
                         summary_writer.add_summary(train_summary, global_step)
@@ -357,8 +357,8 @@ def train():
                     local_step += 1
                     _ = step_time
                     step_time = time.time()
-                    sec_per_step = sec_per_step * 0.9 + (step_time - _) * 0.1
-                    sys.stderr.write('{} sec/step. local step: {}     \r'.format(sec_per_step, local_step))
+                    sec_per_step = sec_per_step * 0.99 + (step_time - _) * 0.01
+                    sys.stderr.write('{} s/step. loc: {}, glb: {}, score: {}     \r'.format(sec_per_step, local_step, global_step, score))
                 except tf.errors.OutOfRangeError:
                     break
         # last parameter save
