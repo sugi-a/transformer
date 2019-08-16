@@ -290,6 +290,7 @@ def train():
                 if should_stop: break
                 try:
                     if global_step % params["train"]["stop"]["early_stopping"]["test_period"] == 0 and global_step != last_check_step:
+                        last_check_step = global_step
                         # validation
                         if hasattr(model_config, 'validation_metric'):
                             logger.info('Evaluating by the custom metric')
