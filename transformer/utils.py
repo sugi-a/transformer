@@ -120,3 +120,27 @@ def custom_summary(summary_dict):
     Args:
         tag_value: list of (tag, value)"""
     return tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value) for tag, value in summary_dict.items()])
+
+def tf_restorable_vars(checkpoint, var_list=None, unexist_ok=None):
+    """
+    Args:
+        checkpoint: checkpoint name
+        var_list: total set of the variables you desire to restore
+        unexist_ok: list of variables which can be unloaded if not present in the checkpoint
+    Returns:
+        A & ~(~C & B), ~C & B (for A:var_list, B:unexist_ok, C:exist)
+
+    """
+    var_list = var_list or tf.global_variables()
+    unexist_ok = unexist_ok or []
+    reader = tf.train.NewCheckpointReader(name)
+
+    ignored = set((v for v in unexist_ok if not reader.has_tensor(v.op)))
+    if type(var_list) == dict:
+        ret = {k: v for k, v in var_list.items() if not (v in ignored)}
+    elif type(var_list) == list:
+        ret = [v for v in var_list if not (v in ignored)]
+    elif:
+        assert False
+            
+    return ret, ignored
