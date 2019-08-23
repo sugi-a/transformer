@@ -94,22 +94,22 @@ class Inference:
             self.beam_candidates_scores = compute_parallel(_beam_search, self.inputs_parallel) # [n_gpus]
 
             # Computation graph for calculation of perplexity
-            self.sequence_log_prob = tf.placeholder(tf.bool, [])
+            self.trans_score = tf.placeholder(tf.bool, [])
             def _perplexity(inputs):
                 (x, x_len), (y, y_len) = inputs
                 logits = self.model.get_logits(x, y, x_len, y_len, False)
                 is_target = tf.sequence_mask(y_len, tf.shape(y)[1], dtype=tf.float32)
 
-                logprobs = tf.math.log_softmax(logits, axis=-1) # [batch, length, vocab]
-                seq_logprobs = tf.batch_gather(logprobs, y[:, :, None]) # [batch, length, 1]
-                seq_logprobs = seq_logprobs[:, :, 0]
-                log_perp = tf.reduce_sum(
-                    tf.cond(self.sequence_log_prob,
-                        lambda: seq_logprobs * is_target,
-                        lambda: seq_logprobs * is_target / tf.reduce_sum(is_target, axis=1, keepdims=True)),
-                    axis=1) # [batch]
-                perp = tf.cond(self.sequence_log_prob, lambda: log_perp, lambda:tf.exp(log_perp))# [batch]
-                return perp
+                log_prob_dist = tf.math.log_softmax(logits, axis=-1) # [batch, length, vocab]
+                log_prob = tf.batch_gather(log_prob_dist, y[:, :, None]) # [batch, length, 1]
+                log_prob = log_prob[:, :, 0]
+                seq_log_prob = tf.reduce_sum(seq_log_prob * is_target, axis=1) #[batch]
+                ret = tf.cond(self.trans_score,
+                    lambda: seq_log_prob / tf.pow((5 + y_len[:,None])/(1 + 5),
+                        self.params["test"]["length_penalty_a"]), # translation score
+                    lambda: tf.exp(seq_log_prob / y_len[:, None]) # perplexity
+                )
+                return ret
             self.perplexity = compute_parallel(_perplexity, self.inputs_parallel)
 
     def IDs2tokens(self, IDs):
@@ -171,7 +171,7 @@ class Inference:
 
         return candidates, scores
 
-    def do_calc_perplexity(self, batches, sequence_log_prob=False, session=None, checkpoint=None, reuse_session=True):
+    def do_calc_perplexity(self, batches, trans_score=False):
         """conduct beam search producing results as list of integers.
         Args:
             batches: [batches: (([batch_size: [length: int]], [batch_size: int]),
@@ -187,14 +187,14 @@ class Inference:
         start_time = time.time()
         iter_count = 0
         for batch in batches:
-            run_results.extend(session.run(
+            run_results.extend(self.session.run(
                 self.perplexity,
                 feed_dict={
                     self.ph_dict['x']: batch[0][0],
                     self.ph_dict['x_len']: batch[0][1],
                     self.ph_dict['init_y']: batch[1][0],
                     self.ph_dict['init_y_len']: batch[1][1],
-                    self.sequence_log_prob: sequence_log_prob}
+                    self.trans_score: trans_score}
             ))
             iter_count += 1
             sys.stderr.write('{} sec/step, steps: {}/{}   \r'.format(
@@ -204,7 +204,7 @@ class Inference:
         perp = sum(map(lambda x:x.tolist(), run_results), [])
         return perp
 
-    def calculate_perplexity(self, sources, targets, sequence_log_prob=False):
+    def calculate_perplexity(self, sources, targets, trans_score=False):
         """Calculate the perplexity of the target text given a source text.
         Args:
             sources: [#samples: str]"""
@@ -222,7 +222,7 @@ class Inference:
             batch_capacity=batch_capacity,
             allow_skip=False)
 
-        perp = self.do_calc_perplexity(batches, sequence_log_prob=sequence_log_prob)
+        perp = self.do_calc_perplexity(batches, trans_score=trans_score)
         return perp 
 
     def translate_sentences(self, texts, beam_size=1, return_search_results=False, init_y_texts=None):

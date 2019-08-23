@@ -359,7 +359,7 @@ def train():
                     _ = step_time
                     step_time = time.time()
                     sec_per_step = sec_per_step * 0.99 + (step_time - _) * 0.01
-                    sys.stderr.write('{} s/step. loc: {}, glb: {}, score: {}     \r'.format(sec_per_step, local_step, global_step, score))
+                    sys.stderr.write('{} s/step. loc: {}, glb: {}, score: {}     \r'.format(sec_per_step, local_step, global_step, max_score))
                 except tf.errors.OutOfRangeError:
                     break
         # last parameter save
