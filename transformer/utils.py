@@ -133,14 +133,14 @@ def tf_restorable_vars(checkpoint, var_list=None, unexist_ok=None):
     """
     var_list = var_list or tf.global_variables()
     unexist_ok = unexist_ok or []
-    reader = tf.train.NewCheckpointReader(name)
+    reader = tf.train.NewCheckpointReader(checkpoint)
 
     ignored = set((v for v in unexist_ok if not reader.has_tensor(v.op)))
     if type(var_list) == dict:
         ret = {k: v for k, v in var_list.items() if not (v in ignored)}
     elif type(var_list) == list:
         ret = [v for v in var_list if not (v in ignored)]
-    elif:
+    else:
         assert False
             
     return ret, ignored

@@ -37,6 +37,47 @@ def get_learning_rate(step, warm_up_step, embed_size):
                                                 step * tf.pow(WARM_UP_STEP, -1.5))
     return rate
 
+class StatusVar:
+    def __init__(self, name, init, dtype):
+        with tf.variable_scope(name):
+            self.var = tf.get_variable(name, dtype=dtype, initializer=init, trainable=False)
+            self.ph = tf.placeholder(dtype, self.var.shape)
+            self.assign = self.var.assign(self.ph)
+
+    def set(self, value):
+        tf.get_default_session().run(self.assign, feed_dict={self.ph: value})
+
+class ValidationScore:
+    def __init__(self, name, early_stop_step, early_stop_epoch):
+        with tf.variable_scope(name):
+            self.keys = ['score', 'step', 'epoch']
+            self.svs = [StatusVar(n, init, dt) for n,init,dt in
+                zip(self.keys, (-np.inf, 2**30, 2**30), (tf.float32, tf.int32, tf.int32))]
+        self.step_limit, self.epoch_limit = early_stop_step, early_stop_epoch
+        self.early_stop_step, self.early_stop_epoch = early_stop_step, early_stop_epoch
+
+    def get(self):
+        return tf.get_default_session().run([sv.var for sv in self.svs])
+
+    def update(self, score, step, epoch):
+        mscore, mstep, mepoch = self.get()
+
+        if score > mscore:
+            tf.get_default_session().run([sv.assign for sv in self.svs],
+                feed_dict={sv.ph: value for sv, value in zip(self.svs, (score, step, epoch))})
+            return True
+
+        return False
+
+    def should_stop(self, step, epoch):
+        mscore, mstep, mepoch = self.get()
+
+        # early stopping test
+        if step - mstep > self.early_stop_step or epoch - mepoch > self.early_stop_epoch:
+            return True
+
+        return False
+
 def train():
     basicConfig(level=DEBUG)
     logger.info('Start.')
@@ -181,9 +222,9 @@ def train():
     with tf.variable_scope('validation_status'):
         conf = params['train']['stop']['early_stopping']
         if conf['type'] == 'step':
-            s, e = conf['n'], 1e10
+            s, e = conf['n'], 2**30
         else:
-            s, e = 1e10, conf['n']
+            s, e = 2**30, conf['n']
         metric_score = ValidationScore('metric_score', s, e)
         loss_score = ValidationScore('loss', s, e)
 
@@ -355,47 +396,6 @@ def train():
 
 if __name__ == '__main__':
     train()
-
-class StatusVar:
-    def __init__(self, name, init, dtype):
-        with tf.variable_scope(name):
-            self.var = tf.get_variable(name, dtype=dtype, initializer=init, trainable=False)
-            self.ph = tf.placeholder(dtype, self.var.shape)
-            self.assign = self.var.assign(self.ph)
-
-    def set(self, value):
-        tf.get_default_session().run(self.assign, feed_dict={self.ph: value})
-
-class ValidationScore:
-    def __init__(self, name, early_stop_step, early_stop_epoch):
-        with tf.variable_scope(name):
-            self.keys = ['score', 'step', 'epoch']
-            self.svs = [StatusVar(n, init, dt) for n,init,dt in
-                zip(self.keys, (-np.inf, 1e10, 1e10), (tf.float32, tf.int32, tf.int32))]
-        self.step_limit, self.epoch_limit = step_limit, epoch_limit
-        self.early_stop_step, self.early_stop_epoch = early_stop_step, early_stop_epoch
-
-    def get(self):
-        return tf.get_default_session().run((sv.var for sv in self.svs))
-
-    def update(self, score, step, epoch):
-        mscore, mstep, mepoch = self.get()
-
-        if score > mscore:
-            tf.get_default_session().run([sv.assign for sv in self.svs],
-                feed_dict={sv.ph: value for sv, value in zip(self.svs, (score, step, epoch))})
-            return True
-
-        return False
-
-    def should_stop(self, step, epoch):
-        mscore, mstep, mepoch = self.get()
-
-        # early stopping test
-        if step - mstep > self.early_stop_step or epoch - mepoch > self.early_stop_epoch:
-            return True
-
-        return False
 
 
 """

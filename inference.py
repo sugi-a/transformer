@@ -103,11 +103,11 @@ class Inference:
                 log_prob_dist = tf.math.log_softmax(logits, axis=-1) # [batch, length, vocab]
                 log_prob = tf.batch_gather(log_prob_dist, y[:, :, None]) # [batch, length, 1]
                 log_prob = log_prob[:, :, 0]
-                seq_log_prob = tf.reduce_sum(seq_log_prob * is_target, axis=1) #[batch]
+                seq_log_prob = tf.reduce_sum(log_prob * is_target, axis=1) #[batch]
                 ret = tf.cond(self.trans_score,
-                    lambda: seq_log_prob / tf.pow((5 + y_len[:,None])/(1 + 5),
-                        self.params["test"]["length_penalty_a"]), # translation score
-                    lambda: tf.exp(seq_log_prob / y_len[:, None]) # perplexity
+                    lambda: seq_log_prob / tf.cast(tf.pow((5 + y_len[:,None])/(1 + 5),
+                        self.params["test"]["length_penalty_a"]), tf.float32),  # trans. score
+                    lambda: tf.exp(seq_log_prob / tf.cast(y_len[:, None], tf.float32)) # perplexity
                 )
                 return ret
             self.perplexity = compute_parallel(_perplexity, self.inputs_parallel)
