@@ -305,10 +305,12 @@ def train():
 
         # step and epoch
         global_step = global_step_var.eval()
-        epoch = 0
+        epoch = epoch_sv.var.eval()
+
+        # stop test
+        _should_stop =  should_stop(global_step, epoch)
 
         # Training epoch loop
-        _should_stop = False
         last_validation_step = global_step
         while not _should_stop:
             # increment epoch
@@ -381,6 +383,20 @@ def train():
                                 break
                         dev_summary = sess.run(dev_summary_op)
                         summary_writer.add_summary(dev_summary, global_step)
+
+                        # update dev loss score
+                        dev_loss_score = - sess.run(dev_info_avg.average['loss'])
+                        loss_score.update(dev_loss_score, global_step, epoch)
+
+                        # stop test by dev loss
+                        _should_stop = should_stop(global_step, epoch)
+                        if _should_stop:
+                            # save the lastest state
+                            logger.info('Saving params. step: {}, score: {}'.format(global_step, score))
+                            saver.save(sess, checkpoint_dir + '/model', global_step=global_step)
+
+                            break
+
 
                     else:
                         global_step, _ = sess.run([global_step_var, train_info['train_op']])
