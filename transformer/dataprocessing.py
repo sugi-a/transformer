@@ -180,6 +180,10 @@ def make_batches_from_zipped_list(
 
     if order_mode == 'sort':
         zipped_lines.sort(key=lambda x: len(x[0]))
+        # avoid containing equivalent sentences in a batch
+        # by disperating them to four distant positions in the dataset
+        zipped_lines = sum((zipped_lines[i::4] for i in range(4)), [])
+
     elif order_mode == 'shuffle':
         zipped_lines = np.random.permutation(zipped_lines)
     else:
