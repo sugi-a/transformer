@@ -118,7 +118,6 @@ def train():
             UNK_ID=params["vocab"]["UNK_ID"],
             EOS_ID=params["vocab"]["EOS_ID"],
             PAD_ID=params["vocab"]["PAD_ID"],
-            maxlen=params["train"]["data"]["maxlen"],
             batch_capacity=params["train"]["batch"]["capacity"] // args.n_gpus,
             order_mode='sort' if params["train"]["batch"]["sort"] else "shuffle",
             allow_skip=True)
@@ -133,9 +132,6 @@ def train():
                         EOS_ID=params["vocab"]["EOS_ID"],
                         shuffle_size=2000*1000,
                         ncpu=args.n_cpu_cores)
-            .filter(lambda x,y: tf.logical_and(
-                tf.greater(params["train"]["data"]["maxlen"], x[1]),
-                tf.greater(params["train"]["data"]["maxlen"], y[1])))
             .padded_batch(params["train"]["batch"]["size"] // args.n_gpus,
                   (([None], []), ([None], [])),
                   ((params["vocab"]["PAD_ID"], 0), (params["vocab"]["PAD_ID"], 0)))

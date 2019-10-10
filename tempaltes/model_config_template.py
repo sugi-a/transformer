@@ -25,7 +25,6 @@ params = {
             }
         },
         "data": {
-            "maxlen": 64,
             "source_train": [],
             "target_train": [],
             "source_dev": "",

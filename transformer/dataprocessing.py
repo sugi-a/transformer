@@ -106,12 +106,9 @@ def make_source_target_zipped_list(
                 target_vocab_file_name,
                 UNK_ID,
                 EOS_ID,
-                PAD_ID,
-                maxlen,
-                allow_skip=True):
+                PAD_ID):
     '''
     Args: Mostly the same as make_dataset_source_target.
-        maxlen: a sentence pair is ignored if one or both sentence in it has more tokens than `maxlen`
         batch_capacity: batch's capacity (=shape[0]*shape[1]) doesn't exceed this value.
     Returns:
         List of nested structure:
@@ -141,7 +138,6 @@ def make_source_target_zipped_list(
 
     # Convert to ID, add EOS and check length
     new_zipped_lines = []
-    n_ignored_pairs = 0
     for s_seq, t_seq in zipped_lines:
         # Convert tokens to IDs
         s_seq = [s_token2ID.get(token, UNK_ID) for token in s_seq if len(token) > 0]
@@ -152,20 +148,10 @@ def make_source_target_zipped_list(
             s_seq = s_seq + [EOS_ID]
             t_seq = t_seq + [EOS_ID]
 
-        # get sequence length
-        s_len, t_len = len(s_seq), len(t_seq)
-
-        # Skip too long sequences
-        if s_len > maxlen or t_len > maxlen:
-            assert allow_skip
-            n_ignored_pairs += 1
-            continue
-        else:
-            new_zipped_lines.append((s_seq, t_seq))
+        new_zipped_lines.append((s_seq, t_seq))
 
     logger.debug('make_source_target_zipped_list')
-    logger.debug('''make_source_target_zipped_list done.
-Number of ignored pairs:{}. Time: {}sec'''.format(n_ignored_pairs, time.time() - _start_time))
+    logger.debug('''make_source_target_zipped_list done. {}sec'''.format(time.time() - _start_time))
 
     return new_zipped_lines
 
@@ -248,13 +234,11 @@ def make_batches_source_target_const_capacity_batch_from_list(
                 UNK_ID,
                 EOS_ID,
                 PAD_ID,
-                maxlen,
                 batch_capacity,
                 order_mode=None,
-                allow_skip=True):
+                allow_skip=False):
     '''
     Args: Mostly the same as make_dataset_source_target.
-        maxlen: a sentence pair is ignored if one or both sentence in it has more tokens than `maxlen`
         batch_capacity: batch's capacity (=shape[0]*shape[1]) doesn't exceed this value.
     Returns:
         List of nested structure:
@@ -269,18 +253,16 @@ def make_batches_source_target_const_capacity_batch_from_list(
     '''
     logger.debug('make_batches_source_target_const_capacity_batch_from_list')
 
-    assert maxlen <= batch_capacity
-
     if type(source_list) == 'str': source_list = [source_list]
     if type(target_list) == 'str': target_list = [target_list]
     assert len(source_list) == len(target_list)
     zipped_list = make_source_target_zipped_list(source_list, target_list,
         source_vocab_file_name, target_vocab_file_name,
-        UNK_ID, EOS_ID, PAD_ID, maxlen, allow_skip)
+        UNK_ID, EOS_ID, PAD_ID)
 
     # Make batches
-    padded_batches = make_batches_from_zipped_list(zipped_list,
-        PAD_ID, batch_capacity, order_mode, allow_skip)
+    padded_batches = make_batches_from_zipped_list(zipped_list, PAD_ID, batch_capacity,
+        order_mode, allow_skip)
 
     return padded_batches
 
@@ -292,13 +274,11 @@ def make_dataset_source_target_const_capacity_batch_from_list(
                 UNK_ID,
                 EOS_ID,
                 PAD_ID,
-                maxlen,
                 batch_capacity,
                 order_mode=None,
-                allow_skip=True):
+                allow_skip=False):
     '''
     Args: Mostly the same as make_dataset_source_target.
-        maxlen: a sentence pair is ignored if one or both sentence in it has more tokens than `maxlen`
         batch_capacity: batch's capacity (=shape[0]*shape[1]) doesn't exceed this value.
     Returns:
         Dataset is sorted by the number of tokens in the source sentences and then batched from the beginning.
@@ -309,11 +289,10 @@ def make_dataset_source_target_const_capacity_batch_from_list(
         
     '''
     logger.debug('make_dataset_source_target_const_capacity_batch_from_list')
-    assert maxlen <= batch_capacity
 
     zipped_list = make_source_target_zipped_list(source_list, target_list,
         source_vocab_file_name, target_vocab_file_name,
-        UNK_ID, EOS_ID, PAD_ID, maxlen, allow_skip)
+        UNK_ID, EOS_ID, PAD_ID)
 
     # Make batches
     def gen():
@@ -335,7 +314,6 @@ def make_dataset_source_target_const_capacity_batch(
                 *args, **kwargs):
     '''
     Args: Mostly the same as make_dataset_source_target.
-        maxlen: a sentence pair is ignored if one or both sentence in it has more tokens than `maxlen`
         batch_capacity: batch's capacity (=shape[0]*shape[1]) doesn't exceed this value.
     Returns:
         Dataset is sorted by the number of tokens in the source sentences and then batched from the beginning.
