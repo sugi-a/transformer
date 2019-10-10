@@ -7,10 +7,10 @@ from logging import getLogger, DEBUG, basicConfig; logger = getLogger(__name__)
 params = {
     "train": {
         "batch": {
-            "fixed_capacity": False,
+            "fixed_capacity": True,
             "size": 128,
             "capacity": 128 * 64,
-            "sort": False
+            "sort": True
         },
         "warm_up_step": 4000,
         "stop": {
@@ -20,8 +20,8 @@ params = {
             },
             "early_stopping":{
                 "type": "step", # "step" or "epoch"
-                "n": 15000,
-                "test_period": 1500
+                "n": 20000,
+                "test_period": 3000
             }
         },
         "data": {
