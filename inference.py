@@ -2,8 +2,8 @@ import argparse, sys, os, codecs, subprocess, time
 from collections import deque
 import tensorflow as tf
 import numpy as np
-from logging import getLogger, StreamHandler, DEBUG
-logger = getLogger('Translator'); logger.setLevel(DEBUG)
+from logging import getLogger, INFO, basicConfig
+logger = getLogger('Translator')
 
 from transformer.model import *
 from transformer.utils import *
@@ -148,7 +148,7 @@ class Inference:
             The structure is ([batch_size, beam_size, length(variable)], [batch_size, beam_size])"""
 
         assert self.session
-        logger.info('Beam search decoding.')
+        logger.debug('Beam search decoding.')
 
         # Beam search
         run_results = []
@@ -285,6 +285,9 @@ class Inference:
             return candidates
 
 def main():
+    # logger
+    basicConfig(level=INFO)
+
     # keys
     TRANSLATE = 'translate'
     PERPLEXITY = 'perplexity'

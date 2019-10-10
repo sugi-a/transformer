@@ -1,6 +1,6 @@
 import sys, os, codecs, time
 from logging import getLogger
-logger = getLogger()
+logger = getLogger(__name__)
 
 import tensorflow as tf
 from tensorflow.contrib.framework import nest
@@ -125,7 +125,7 @@ def make_source_target_zipped_list(
         
     '''
     _start_time = time.time()
-    logger.info('make_source_target_zipped_list')
+    logger.debug('make_source_target_zipped_list')
 
     # Make token->ID mapping
     with codecs.open(source_vocab_file_name) as sv_f, codecs.open(target_vocab_file_name) as tv_f:
@@ -137,7 +137,7 @@ def make_source_target_zipped_list(
     zipped_lines = [(sl.strip().split(' '), tl.strip().split(' ')) for sl,tl in zip(source_list, target_list)]
 
     # Make batches
-    logger.info('#pairs in the original dataset:{}'.format(len(zipped_lines)))
+    logger.debug('#pairs in the original dataset:{}'.format(len(zipped_lines)))
 
     # Convert to ID, add EOS and check length
     new_zipped_lines = []
@@ -163,8 +163,8 @@ def make_source_target_zipped_list(
         else:
             new_zipped_lines.append((s_seq, t_seq))
 
-    logger.info('make_source_target_zipped_list')
-    logger.info('''make_source_target_zipped_list done.
+    logger.debug('make_source_target_zipped_list')
+    logger.debug('''make_source_target_zipped_list done.
 Number of ignored pairs:{}. Time: {}sec'''.format(n_ignored_pairs, time.time() - _start_time))
 
     return new_zipped_lines
@@ -218,13 +218,13 @@ def make_batches_from_zipped_list(
         t_batch.append(t_seq)
         s_lens.append(s_len)
         t_lens.append(t_len)
-    logger.info('''Making batches done. Number of ignored pairs:{}
+    logger.debug('''Making batches done. Number of ignored pairs:{}
 Number of batches:{}, time:{}sec'''.format(
     n_ignored_pairs, len(batches), time.time()-_start_time))
 
     # Pad batches. structure: ((seq, len), (seq, len))
     _start_time = time.time()
-    logger.info('Padding batches.')
+    logger.debug('Padding batches.')
     padded_batches = []
     for s_batch, s_lens, t_batch, t_lens in batches:
         s_batch_length = max(s_lens)
@@ -232,7 +232,7 @@ Number of batches:{}, time:{}sec'''.format(
         padded_s_batch = [seq + [PAD_ID] * (s_batch_length - l) for seq,l in zip(s_batch, s_lens)]
         padded_t_batch = [seq + [PAD_ID] * (t_batch_length - l) for seq,l in zip(t_batch, t_lens)]
         padded_batches.append(((padded_s_batch, s_lens), (padded_t_batch, t_lens)))
-    logger.info('Padding batches done. time: {}sec'.format(time.time() - _start_time))
+    logger.debug('Padding batches done. time: {}sec'.format(time.time() - _start_time))
 
     if order_mode == 'sort':
         logger.debug('permutation of sorted batches')
@@ -267,7 +267,7 @@ def make_batches_source_target_const_capacity_batch_from_list(
         every training iteration changes the order of batches but the contents in each batch remains the same.
         
     '''
-    logger.info('make_batches_source_target_const_capacity_batch_from_list')
+    logger.debug('make_batches_source_target_const_capacity_batch_from_list')
 
     assert maxlen <= batch_capacity
 
@@ -308,7 +308,7 @@ def make_dataset_source_target_const_capacity_batch_from_list(
         every training iteration changes the order of batches but the contents in each batch remains the same.
         
     '''
-    logger.info('make_dataset_source_target_const_capacity_batch_from_list')
+    logger.debug('make_dataset_source_target_const_capacity_batch_from_list')
     assert maxlen <= batch_capacity
 
     zipped_list = make_source_target_zipped_list(source_list, target_list,
@@ -345,9 +345,9 @@ def make_dataset_source_target_const_capacity_batch(
         every training iteration changes the order of batches but the contents in each batch remains the same.
         
     '''
-    logger.info('make_dataset_source_target_const_capacity_batch')
+    logger.debug('make_dataset_source_target_const_capacity_batch')
 
-    logger.info('Reading data file.')
+    logger.debug('Reading data file.')
     if type(source_file_name) == type([]):
         assert len(source_file_name) == len(target_file_name)
         source_lines, target_lines = [], []
