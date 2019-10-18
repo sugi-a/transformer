@@ -289,15 +289,15 @@ def train():
             restorer = None; logger.debug('Checkpoint was not found.')
         else:
             v_list, ignore = tf_restorable_vars(latest_checkpoint, unexist_ok=None)
-            restorer = tf.train.Saver(v_list, max_to_keep=4)
+            restorer = tf.train.Saver(v_list, max_to_keep=1)
             if len(ignore) > 0:
                 logger.info('Variables not restored: {}'.format(', '.join(v.op for v in ignore)))
             logger.info('Restoring from: {}'.format(latest_checkpoint))
             restorer.restore(sess, latest_checkpoint)
         # - periodic saver
-        saver = tf.train.Saver(tf.global_variables(), max_to_keep=4)
+        saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)
         # - max validation score saver
-        sup_saver = tf.train.Saver(tf.global_variables(), max_to_keep=4)
+        sup_saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)
 
         # step and epoch
         global_step = global_step_var.eval()
@@ -402,6 +402,7 @@ def train():
                     sec_per_step = sec_per_step * 0.99 + (step_time - _) * 0.01
                     sys.stderr.write('{} s/step. epoch: {}, glb: {}\t\r'.format(
                         sec_per_step, epoch, global_step))
+                    sys.stderr.flush()
                 except tf.errors.OutOfRangeError:
                     break
 

@@ -219,7 +219,6 @@ class Inference:
             self.EOS_ID,
             self.PAD_ID,
             batch_capacity,
-            batch_capacity=batch_capacity,
             allow_skip=False)
 
         perp = self.do_calc_perplexity(batches, trans_score=trans_score)
@@ -260,7 +259,6 @@ class Inference:
             self.EOS_ID,
             self.PAD_ID,
             batch_capacity,
-            batch_capacity=batch_capacity,
             allow_skip=False)
 
         candidates, scores = self.do_beam_search(batches, beam_size)
