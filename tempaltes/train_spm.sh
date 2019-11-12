@@ -1,11 +1,17 @@
 #!/bin/bash -e
 
+MODEL_CONFIG_JSON="./model_config.json"
+
+
 SRC=""
 TRG=""
 MODEL_PREFIX=""
-VOCAB_SIZE=""
-
-
+VOCAB_SIZE="$(cat MODEL_CONFIG_JSON | jq '.vocab.vacab_size')"
+PAD_ID="$(cat MODEL_CONFIG_JSON | jq '.vocab.PAD_ID')"
+SOS_ID="$(cat MODEL_CONFIG_JSON | jq '.vocab.SOS_ID')"
+EOS_ID="$(cat MODEL_CONFIG_JSON | jq '.vocab.EOS_ID')"
+UNK_ID="$(cat MODEL_CONFIG_JSON | jq '.vocab.UNK_ID')"
+USER_SYMBOLS=""
 
 
 spm_train \
