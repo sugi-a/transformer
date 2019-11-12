@@ -201,7 +201,7 @@ class Encoder(tf.layers.Layer):
         super().__init__(*args, **kwargs)
         self.params = params
         self.embedding_layer = Embedding_layer(
-            self.params["network"]["vocab_size"], self.params["network"]["embed_size"])
+            self.params["vocab"]["vocab_size"], self.params["network"]["embed_size"])
 
     def build(self, input_shape):
 
@@ -241,7 +241,7 @@ class Decoder(tf.layers.Layer):
 
     def build(self, input_shape):
         if self.embedding_layer is None:
-            self.embedding_layer = Embedding_layer(self.params["network"]["vocab_size"], self.params["network"]["embed_size"])
+            self.embedding_layer = Embedding_layer(self.params["vocab"]["vocab_size"], self.params["network"]["embed_size"])
         else:
             # if the embedding layer is owned by another Layer it must be built until now
             # in order to avoid ambiguous variable scope tree

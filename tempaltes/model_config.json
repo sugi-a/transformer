@@ -1,0 +1,51 @@
+{
+    "train": {
+        "batch": {
+            "fixed_capacity": true,
+            "size": 128,
+            "capacity": 8192,
+            "sort": true
+        },
+        "warm_up_step": 4000,
+        "stop": {
+            "limit":{
+                "type": "step",
+                "n": 300000
+            },
+            "early_stopping":{
+                "type": "step",
+                "n": 20000,
+                "test_period": 3000
+            }
+        },
+        "data": {
+            "source_train": [],
+            "target_train": [],
+            "source_dev": "",
+            "target_dev": ""
+        }
+    },
+    "test": {
+        "length_penalty_a": 1.0
+    },
+    "network": {
+        "n_blocks": 6,
+        "n_heads": 8,
+        "attention_size": 512,
+        "embed_size": 512,
+        "dropout_rate": 0.1,
+        "share_embedding": true,
+        "positional_embedding": false
+    },
+    "vocab": {
+        "PAD_ID": 0,
+        "SOS_ID": 1,
+        "EOS_ID": 2,
+        "UNK_ID": 3,
+        "vocab_size": 16000,
+        "source_dict": "",
+        "target_dict": ""
+    }
+    
+}
+
