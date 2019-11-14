@@ -34,7 +34,7 @@ def IDs2tokens(IDs):
 
 with open(<dev_src>) as f:
     __src_lines = [line.strip() for line in f]
-with codecs.open(<dev_trg>) as f:
+with open(<dev_trg>) as f:
     __trg_lines = [line.strip() for line in f]
 
     # decode, split, wrap
