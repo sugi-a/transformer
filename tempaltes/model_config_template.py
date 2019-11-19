@@ -1,8 +1,4 @@
-# Templete of model_config.py
-assert False
-
-import os, subprocess, json
-from logging import getLogger, DEBUG, basicConfig; logger = getLogger(__name__)
+import os, json
 
 with open(os.path.dirname(__file__) + '/' + 'model_config.json') as f:
     params = json.load(f)

@@ -1,4 +1,5 @@
 {
+    "basedir": null,
     "train": {
         "batch": {
             "fixed_capacity": true,
@@ -14,8 +15,8 @@
             },
             "early_stopping":{
                 "type": "step",
-                "n": 20000,
-                "test_period": 3000
+                "n": 50000,
+                "test_period": 4000
             }
         },
         "data": {

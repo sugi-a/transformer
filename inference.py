@@ -10,7 +10,7 @@ from components.utils import *
 from components import dataprocessing
 
 class Inference:
-    def __init__(self, model_config, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=8, batch_capacity=None, sampling_method=None):
+    def __init__(self, model_config, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=8, batch_capacity=8192, sampling_method=None):
         """Build translator
         
         Args:
@@ -64,8 +64,6 @@ class Inference:
         self.checkpoint = checkpoint
 
         with self.graph.as_default():
-            if batch_capacity is None:
-                batch_capacity = 128 * 64
             self.batch_capacity = batch_capacity
 
             self.ph_dict = {
