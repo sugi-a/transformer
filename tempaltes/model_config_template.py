@@ -1,7 +1,24 @@
 import os, json
+"""
+What this module must have:
+    params: configuration of the Transformer and training. (dict)
+What this module can have:
+    IDs2tokens: method to convert IDs [nlines, maxlen] into tokens (function)
+    validation_metric: validation function
+"""
 
 with open(os.path.dirname(__file__) + '/' + 'model_config.json') as f:
     params = json.load(f)
+
+if 'basedir' in params: # add prefix to the dataset paths
+    _p = params["basedir"] + '/'
+    for k in ["source_train", "target_train"]:
+        for i in range(len(params["train"]["data"][k])):
+            params["train"]["data"][k][i] = _p + params["train"]["data"][k][i]
+    params["train"]["data"]["source_dev"] = _p + params["train"]["data"]["source_dev"]
+    params["train"]["data"]["target_dev"] = _p + params["train"]["data"]["target_dev"]
+    params["vocab"]["source_dict"] = _p + params["vocab"]["source_dict"]
+    params["vocab"]["target_dict"] = _p + params["vocab"]["target_dict"]
 
 # Following two functions can be customly defined
 """
