@@ -299,14 +299,26 @@ def main():
     parser.add_argument('--batch_capacity', type=int, default=None)
     parser.add_argument('--context_delimiter', type=str, default=None)
     parser.add_argument('--beam_size', type=int, default=1)
+    parser.add_argument('--basedir', type=str, default=None)
     args = parser.parse_args()
-    
-    sys.path.insert(0, args.model_dir)
+
+    # model's working directory, where the config file is placed
+    model_dir = os.path.abspath(args.model_dir)
+
+    # load model_config.py
+    sys.path.insert(0, model_dir)
     import model_config
     params = model_config.params
+
+    # log directory. (model dir)/log
+    logdir = model_dir + '/log'
+
+    # Change directory if specified in the command line params or config.
+    os.chdir(args.basedir or params["basedir"] or '.')
     
-    # checkpoint
-    checkpoint = args.checkpoint or tf.train.latest_checkpoint(args.model_dir + '/log/sup_checkpoint')
+    
+    # load checkpoint from MODELDIR/log/sup_checkpoint/ (if not specified)
+    checkpoint = args.checkpoint or tf.train.latest_checkpoint(logdir + '/sup_checkpoint')
     assert checkpoint is not None; logger.debug('checkpoint', checkpoint)
 
     # batch_capacity (specified or decided according to n_gpus)

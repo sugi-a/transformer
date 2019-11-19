@@ -90,22 +90,30 @@ def train():
                         help='Number of cpu cores used by `tf.data.Dataset.map`')
     parser.add_argument('--n_gpus', default=1, type=int,
                         help='Number of GPUs available')
-    parser.add_argument('--central_device_data_parallel', default='None',
-                        help='"None" is converted to `None`. Default is "None"')
+    parser.add_argument('--central_device_data_parallel', default=None,
+                        help='device where NN parameters are placed')
     parser.add_argument('--random_seed', default=0, type=int)
-
     parser.add_argument('--inherit_no_bleu_improve', default=10, type=int)
+    parser.add_argument('--basedir', default=None, type=str)
 
     args = parser.parse_args()
-    if args.central_device_data_parallel == 'None':
-        args.central_device_data_parallel = None
 
-    sys.path.insert(0, args.model_dir)
+    # model's working directory
+    model_dir = os.path.abspath(args.model_dir)
+
+    # load model_config.py
+    sys.path.insert(0, model_dir)
     import model_config
     params = model_config.params
-    logdir = args.model_dir + '/log'; os.makedirs(logdir, exist_ok=True)
+
+    # log directory MODELDIR/log
+    logdir = args.model_dir + '/log'
+    os.makedirs(logdir, exist_ok=True)
     with codecs.open(logdir + '/config.json', 'w') as f:
         json.dump(params, f, ensure_ascii=False, indent=4)
+
+    # Change directory if specified in the commad line params or config
+    os.chdir(args.basedir or params["basedir"] or '.')
 
     # train dataset
     if params["train"]["batch"]["fixed_capacity"]:
