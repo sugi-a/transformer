@@ -8,9 +8,9 @@ from tensorflow.contrib.framework import nest
 import numpy as np
 np.random.seed(seed=0)
 
-from transformer.utils import *
-from transformer.model import *
-from transformer import dataprocessing
+from components.utils import *
+from components.model import *
+from components import dataprocessing
 from inference import Inference
 
 def get_train_info(y, y_len, dec_outputs):

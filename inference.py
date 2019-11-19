@@ -5,9 +5,9 @@ import numpy as np
 from logging import getLogger, INFO, basicConfig
 logger = getLogger('Translator')
 
-from transformer.model import *
-from transformer.utils import *
-from transformer import dataprocessing
+from components.model import *
+from components.utils import *
+from components import dataprocessing
 
 class Inference:
     def __init__(self, model_config, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=8, batch_capacity=None, sampling_method=None):
