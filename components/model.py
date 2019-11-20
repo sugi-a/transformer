@@ -175,7 +175,10 @@ class Feedforward(tf.layers.Layer):
         return outputs
 
 def label_smoothing(labels, eps=0.1):
-    return (1 - eps) * labels + (eps/tf.cast(tf.shape(labels)[-1], tf.float32))
+    if eps == 0:
+        return labels
+    else:
+        return (1 - eps) * labels + eps/tf.cast(tf.shape(labels)[-1], tf.float32)
 
 class BlockWrapper(tf.layers.Layer):
     def __init__(self, layer, params, *args, **kwargs):
