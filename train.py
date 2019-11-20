@@ -60,7 +60,7 @@ class Train:
         y_onehot = tf.one_hot(y, tf.shape(dec_outputs)[-1])
 
         # Label smoothing
-        pred_smoothed = label_smoothing(y_onehot, self.params["network"]["label_smoothing"])
+        pred_smoothed = label_smoothing(y_onehot, self.params["train"]["label_smoothing"])
 
         # Top-1 prediction by the model [BATCH_SIZE, MAXLEN]
         prediction = tf.cast(tf.math.argmax(dec_outputs, axis=-1), tf.int32)

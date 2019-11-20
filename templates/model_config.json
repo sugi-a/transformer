@@ -8,6 +8,7 @@
             "sort": true
         },
         "warm_up_step": 4000,
+        "label_smoothing": 0.1,
         "stop": {
             "limit":{
                 "type": "step",
@@ -36,8 +37,7 @@
         "embed_size": 512,
         "dropout_rate": 0.1,
         "share_embedding": true,
-        "positional_embedding": false,
-        "label_smoothing": 0.1
+        "positional_embedding": false
     },
     "vocab": {
         "PAD_ID": 0,
