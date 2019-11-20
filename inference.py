@@ -64,7 +64,7 @@ class Inference:
         self.checkpoint = checkpoint
 
         with self.graph.as_default():
-            self.batch_capacity = batch_capacity
+            self.batch_capacity = batch_capacity or 8192
 
             self.ph_dict = {
                 'x': tf.placeholder(tf.int32, [None, None]),
