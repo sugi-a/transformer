@@ -118,7 +118,7 @@ class Train:
                 logger.info('stop for the epoch limit'); return True
 
         # early stopping
-        if self.metric_score.should_stop(step, epoch) and loss_score.should_stop(step, epoch):
+        if self.metric_score.should_stop(step, epoch) and self.loss_score.should_stop(step, epoch):
             logger.info('early stopping') ; return True
 
         return False
@@ -221,7 +221,7 @@ class Train:
             else:
                 s, e = 2**30, conf['n']
             self.metric_score = ValidationScore('metric_score', s, e)
-            loss_score = ValidationScore('loss', s, e)
+            self.loss_score = ValidationScore('loss', s, e)
 
 
         # For BLEU evaluation
@@ -367,7 +367,7 @@ class Train:
 
                             # update dev loss score
                             dev_loss_score = - sess.run(dev_info_avg.average['loss'])
-                            loss_score.update(dev_loss_score, global_step, epoch)
+                            self.loss_score.update(dev_loss_score, global_step, epoch)
 
                             # stop test by dev loss
                             _should_stop = self.__should_stop(global_step, epoch)
