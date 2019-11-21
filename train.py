@@ -286,6 +286,7 @@ class Train:
             # step and epoch
             global_step = global_step_var.eval()
             epoch = epoch_sv.var.eval()
+            score = 0
 
             # stop test
             _should_stop =  self.__should_stop(global_step, epoch)
