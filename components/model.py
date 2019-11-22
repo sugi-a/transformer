@@ -2,6 +2,10 @@ import tensorflow as tf
 from tensorflow.contrib.framework import nest
 import numpy as np
 
+def length_penalty(length, alpha):
+    return tf.cast(tf.pow((5 + length)/(1 + 5), alpha), dtype=tf.float32)
+
+
 class Layer_norm(tf.layers.Layer):
     def __init__(self, eps=1e-8, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -530,9 +534,6 @@ def beam_search_decode(get_logits_fn, init_cache, init_dec_inputs, init_dec_inpu
     
     with tf.name_scope('batch_size'):
         batch_size = tf.shape(nest.flatten(init_cache)[0])[0]
-
-    def length_penalty(length, alpha):
-        return tf.cast(tf.pow((5 + length)/(1 + 5), alpha), dtype=tf.float32)
 
     def get_shape_keep_last_dim(x):
         orig_shape = x.shape.as_list()
