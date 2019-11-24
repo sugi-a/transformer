@@ -5,59 +5,7 @@ logger = getLogger(__name__)
 import tensorflow as tf
 from tensorflow.contrib.framework import nest
 import numpy as np
-import sentencepiece as spm
 
-
-def text2tokens(sents, model_file):
-    """tokenize sentences into sequences of tokens
-    
-    Args:
-        sents: list of str
-        type: "source" or "target"
-        
-    Returns:
-        list of list of str"""
-    
-    sp = spm.SentencePieceProcessor()
-    sp.Load(model_file)
-    return [sp.EncodeAsPieces(sent) for sent in sents]
-
-def text2IDs(sents, model_file):
-    """tokenize sentences into sequences of IDs
-    
-    Args:
-        sents: list of str
-        
-    Returns:
-        list of list of int"""
-    #in this model_config.py target=ja
-    sp = spm.SentencePieceProcessor()
-    sp.Load(model_file)
-    return [sp.EncodeAsIds(sent) for sent in sents]
-
-def tokens2text(tokens, model_file):
-    """detokenize tokens into strings
-    Args:
-        tokens: list of list of str
-        type: "source" or "target"
-    
-    Returns:
-        list of str"""
-    sp = spm.SentencePieceProcessor()
-    sp.Load(model_config)
-    return [sp.DecodePieces(tok) for tok in tokens]
-
-def IDs2text(seqs, model_file):
-    """detokenize sequence of IDs into strings
-    Args:
-        source_seqs: list of list of int
-    
-    Returns:
-        list of str"""
-    #in this model_config.py source=en
-    sp = spm.SentencePieceProcessor()
-    sp.Load(model_file)
-    return [sp.DecodeIds(seq) for seq in seqs]
 
 def __string2sequence(line, EOS_ID, lookup_table):
     tokens = tf.string_split([line]).values 
