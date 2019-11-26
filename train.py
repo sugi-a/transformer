@@ -13,30 +13,28 @@ from components import dataprocessing
 from inference import Inference
 
 class Train:
-    def __init__(self):
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--model_dir', required=True,
-                            help='Path to the directory containing `model_config.py`')
-        parser.add_argument('--n_cpu_cores', default=4, type=int,
-                            help='Number of cpu cores used by `tf.data.Dataset.map`')
-        parser.add_argument('--n_gpus', default=1, type=int,
-                            help='Number of GPUs available')
-        parser.add_argument('--random_seed', default=0, type=int)
-        parser.add_argument('--inherit_no_bleu_improve', default=10, type=int)
-        self.args = parser.parse_args()
+    def __init__(self, model_dir, n_gpus=1, n_cpu_cores=4, random_seed=0):
 
         # model's working directory
-        self.model_dir = os.path.abspath(self.args.model_dir)
-
-        # load model_config.py
-        sys.path.insert(0, self.model_dir)
-        import model_config
-        self.params = model_config.params
-        self.model_config = model_config
+        self.model_dir = model_dir
 
         # log directory MODELDIR/log
         self.logdir = self.model_dir + '/log'
         os.makedirs(self.logdir, exist_ok=True)
+
+        # load model_config.py
+        self.config = {'model_dir': model_dir}
+        with open(self.model_dir + '/model_config.py', 'r') as f:
+            exec(f.read(), self.config)
+
+        self.params = self.config['params']
+
+        # Computation options
+        self.n_gpus = n_gpus
+        self.n_cpu_cores = n_cpu_cores
+        self.random_seed = random_seed
+
+        # Log the config
         with open(self.logdir + '/config.json', 'w') as f:
             json.dump(self.params, f, ensure_ascii=False, indent=4)
 
@@ -127,8 +125,6 @@ class Train:
         logger.info('Transformer training.')
         
         params = self.params
-        args = self.args
-        model_config = self.model_config
 
         # train dataset
         if params["train"]["batch"]["fixed_capacity"]:
@@ -141,10 +137,10 @@ class Train:
                 UNK_ID=params["vocab"]["UNK_ID"],
                 EOS_ID=params["vocab"]["EOS_ID"],
                 PAD_ID=params["vocab"]["PAD_ID"],
-                batch_capacity=params["train"]["batch"]["capacity"] // args.n_gpus,
+                batch_capacity=params["train"]["batch"]["capacity"] // self.n_gpus,
                 order_mode='sort' if params["train"]["batch"]["sort"] else "shuffle",
                 allow_skip=True)
-            train_data = train_data.prefetch(args.n_gpus * 2)
+            train_data = train_data.prefetch(self.n_gpus * 2)
         else:
             train_data = (dataprocessing.make_dataset_source_target(
                             params["train"]["data"]["source_train"],
@@ -154,11 +150,11 @@ class Train:
                             UNK_ID=params["vocab"]["UNK_ID"],
                             EOS_ID=params["vocab"]["EOS_ID"],
                             shuffle_size=2000*1000,
-                            ncpu=args.n_cpu_cores)
-                .padded_batch(params["train"]["batch"]["size"] // args.n_gpus,
+                            ncpu=self.n_cpu_cores)
+                .padded_batch(params["train"]["batch"]["size"] // self.n_gpus,
                       (([None], []), ([None], [])),
                       ((params["vocab"]["PAD_ID"], 0), (params["vocab"]["PAD_ID"], 0)))
-                .prefetch(args.n_gpus * 2))
+                .prefetch(self.n_gpus * 2))
 
         # dev dataset
         dev_data = dataprocessing.make_dataset_source_target(
@@ -168,22 +164,22 @@ class Train:
                         params["vocab"]["target_dict"],
                         UNK_ID=params["vocab"]["UNK_ID"],
                         EOS_ID=params["vocab"]["EOS_ID"],
-                        ncpu=args.n_cpu_cores
+                        ncpu=self.n_cpu_cores
                     )\
-            .padded_batch(params["train"]["batch"]["size"] // args.n_gpus,
+            .padded_batch(params["train"]["batch"]["size"] // self.n_gpus,
                           (([None], []), ([None], [])),
                           ((params["vocab"]["PAD_ID"], 0), (params["vocab"]["PAD_ID"], 0)))\
-            .prefetch(args.n_gpus * 2)
+            .prefetch(self.n_gpus * 2)
 
         # train/dev iterators and input tensors
         train_iterator = train_data.make_initializable_iterator()
         dev_iterator = dev_data.make_initializable_iterator()
         
-        train_parallel_inputs = [train_iterator.get_next() for i in range(args.n_gpus)]
-        dev_parallel_inputs = [dev_iterator.get_next() for i in range(args.n_gpus)]
+        train_parallel_inputs = [train_iterator.get_next() for i in range(self.n_gpus)]
+        dev_parallel_inputs = [dev_iterator.get_next() for i in range(self.n_gpus)]
         
         # model
-        tf.set_random_seed(args.random_seed)
+        tf.set_random_seed(self.random_seed)
         model = Transformer(params, name='transformer')
         self.model = model
         
@@ -196,7 +192,7 @@ class Train:
         self.optimizer = tf.train.AdamOptimizer(lr)
         self.train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=model.scope_name)
 
-        if args.n_gpus == 1:
+        if self.n_gpus == 1:
             train_info, _ = self.__get_train_info(train_parallel_inputs[0])
             dev_info, dev_ntokens = self.__get_dev_info(dev_parallel_inputs[0])
         else:
@@ -225,7 +221,7 @@ class Train:
 
 
         # For BLEU evaluation
-        inference = Inference(model_config, model, n_gpus=args.n_gpus, n_cpu_cores=args.n_cpu_cores)
+        inference = Inference(self.model_dir, model, n_gpus=self.n_gpus, n_cpu_cores=self.n_cpu_cores)
 
         # Saver and Summary directories
         summary_dir = self.logdir + '/summary'
@@ -313,9 +309,9 @@ class Train:
                         last_validation_step = global_step
 
                         # validation
-                        if hasattr(model_config, 'validation_metric'):
+                        if 'validation_metric' in self.config:
                             logger.info('Evaluating by the custom metric')
-                            score = model_config.validation_metric(global_step, inference)
+                            score = self.config["validation_metric"](global_step, inference)
                         else:
                             logger.info('Custom metric was not found.')
                             
@@ -438,6 +434,19 @@ class ValidationScore:
 
 if __name__ == '__main__':
     basicConfig(level=DEBUG)
-    Train().train()
+
+    # Arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_dir', required=True,
+                        help='Path to the directory containing `model_config.py`')
+    parser.add_argument('--n_cpu_cores', default=4, type=int,
+                        help='Number of cpu cores used by `tf.data.Dataset.map`')
+    parser.add_argument('--n_gpus', default=1, type=int,
+                        help='Number of GPUs available')
+    parser.add_argument('--random_seed', default=0, type=int)
+    args = parser.parse_args()
+
+
+    Train(args.model_dir, args.n_gpus, args.n_cpu_cores, args.random_seed).train()
 else:
     assert False
