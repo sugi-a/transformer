@@ -7,6 +7,32 @@ from tensorflow.contrib.framework import nest
 import numpy as np
 
 
+class Vocabulary:
+    def __init__(self, vocab_file, PAD_ID, EOS_ID, UNK_ID, other_control_symbols=None):
+        with open(vocab_file, 'r') as f:
+            self.ID2tok = [line.split()[0] for line in f]
+            self.tok2ID = {tok: i for i, tok in enumerate(self.ID2tok)}
+
+        self.UNK_ID = UNK_ID
+        self.EOS_ID = EOS_ID
+        self.PAD_ID = PAD_ID
+        self.ctrls = set(other_control_symbols or []) | {PAD_ID, EOS_ID}
+
+
+    def line2IDs(self, line):
+        return [self.tok2ID.get(tok, self.UNK_ID) for tok in line] + [self.EOS_ID]
+
+
+    def text2IDs(self, text):
+        return list(map(self.line2ID, text))
+
+
+    def IDs2text(self, IDs):
+        return [' '.join(self.ID2tok[id]
+            for id in sent if not id in self.ctrls) for sent in IDs]
+
+
+
 def __string2sequence(line, EOS_ID, lookup_table):
     tokens = tf.string_split([line]).values 
     ids = tf.cast(lookup_table.lookup(tokens), tf.int32)
