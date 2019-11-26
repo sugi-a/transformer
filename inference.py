@@ -269,14 +269,16 @@ def main():
     # logger
     basicConfig(level=INFO)
 
-    # keys
+    # mode keys
     TRANSLATE = 'translate'
     PERPLEXITY = 'perplexity'
+    CORPUS_PERP = 'corpus_perplexity'
 
     # arguments
     parser = argparse.ArgumentParser()
+    parser.add_argument('optional', type=str, nargs='*')
     parser.add_argument('--model_dir', type=str, required=True)
-    parser.add_argument('--mode', type=str, default=TRANSLATE)
+    parser.add_argument('--mode', type=str, choices=[TRANSLATE, PERPLEXITY, CORPUS_PERP], default=TRANSLATE)
     parser.add_argument('--n_gpus', type=int, default=1)
     parser.add_argument('--n_cpu_cores', type=int, default=None)
     parser.add_argument('--sampling_method', type=str, default=None)
@@ -305,6 +307,17 @@ def main():
             x = [line.strip() for line in sys.stdin]
             for line in inference.translate_sentences(x, args.beam_size):
                 print(line)
+    elif args.mode == PERPLEXITY or args.mode == CORPUS_PERP:
+        src_f, trg_f = args.optional[0], args.optional[1]
+        with open(src_f, 'r') as f:
+            x = [line.strip() for line in f]
+        with open(trg_f, 'r') as f:
+            y = [line.strip() for line in f]
+
+        if args.mode == PERPLEXITY:
+            print(*inference.calculate_sentence_perplexity(x, y))
+        else:
+            print(inference.calculate_corpus_perplexity(x, y))
 
 
 if __name__ == '__main__':
