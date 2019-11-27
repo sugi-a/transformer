@@ -160,7 +160,10 @@ def make_batches_from_zipped_list(
 
         # Skip too long sequences
         if s_len > batch_capacity or t_len > batch_capacity:
-            assert allow_skip
+            if not allow_skip:
+                logger.error('Too long sentence.len: {} - {}, batch capacity: {}'
+                    .format(s_len, t_len, batch_capacity))
+                exit(1)
             n_ignored_pairs += 1
             continue
 
