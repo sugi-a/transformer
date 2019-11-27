@@ -273,12 +273,14 @@ def main():
     TRANSLATE = 'translate'
     PERPLEXITY = 'perplexity'
     CORPUS_PERP = 'corpus_perplexity'
+    TRANS_DETAIL = 'translate_detail'
+    modes = [TRANSLATE, PERPLEXITY, CORPUS_PERP, TRANS_DETAIL]
 
     # arguments
     parser = argparse.ArgumentParser()
     parser.add_argument('optional', type=str, nargs='*')
-    parser.add_argument('--model_dir', type=str, required=True)
-    parser.add_argument('--mode', type=str, choices=[TRANSLATE, PERPLEXITY, CORPUS_PERP], default=TRANSLATE)
+    parser.add_argument('--model_dir', '--dir', '-d', type=str, required=True)
+    parser.add_argument('--mode', type=str, choices=modes, default=TRANSLATE)
     parser.add_argument('--n_gpus', type=int, default=1)
     parser.add_argument('--n_cpu_cores', type=int, default=None)
     parser.add_argument('--sampling_method', type=str, default=None)
@@ -298,15 +300,23 @@ def main():
 
     inference.make_session()
 
-    if args.mode == TRANSLATE:
+    if args.mode == TRANSLATE or args.mode == TRANS_DETAIL:
         if args.context_delimiter is not None:
             x, y = zip(*(line.split(args.context_delimiter) for line in sys.stdin))
+        else:
+            x, y = [line.strip() for line in sys.stdin], None
+
+        if args.mode == TRANSLATE:
             for line in inference.translate_sentences(x, args.beam_size, init_y_texts=y):
                 print(line)
         else:
-            x = [line.strip() for line in sys.stdin]
-            for line in inference.translate_sentences(x, args.beam_size):
-                print(line)
+            hyp, score = inference.translate_sentences(x, args.beam_size, True, init_y_texts=y)
+            for _hyp, _score in zip(hyp, score):
+                for sent,sent_score in zip(_hyp, _score): 
+                    print('{}\t{}'.format(sent_score, sent))
+                print('')
+
+
     elif args.mode == PERPLEXITY or args.mode == CORPUS_PERP:
         src_f, trg_f = args.optional[0], args.optional[1]
         with open(src_f, 'r') as f:
