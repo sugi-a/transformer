@@ -455,19 +455,6 @@ class Transformer(tf.layers.Layer):
                 init_seq = tf.concat([init_seq, init_y], axis=1)[:, :-1]
                 init_seq_len = init_y_len
 
-        # Check if the input is empty.
-        # Due to the data parallel execution, this graph may recieve an batch with size 0
-        # which leads to undefined behavior and errors in the while_loop.
-        with tf.name_scope('check_empty_batch'):
-            zero_batch = tf.equal(tf.shape(x)[0], 0)
-
-            def size1_dummy(batch):
-                return tf.ones(tf.concat([[1], tf.shape(batch)[1:]], axis=0), dtype=batch.dtype)
-
-            cache, init_seq, init_seq_len = tf.cond(zero_batch,
-                lambda: nest.map_structure(size1_dummy, [cache, init_seq, init_seq_len]),
-                lambda: [cache, init_seq, init_seq_len])
-
         # Maximum target length
         maxlens = tf.minimum(Transformer.MAXLEN - 10, x_len * 3 + 10)
 
@@ -481,10 +468,6 @@ class Transformer(tf.layers.Layer):
                                                      self.params["vocab"]["PAD_ID"],
                                                      self.params["test"]["length_penalty_a"],
                                                      sampling_method=sampling_method)
-
-        with tf.name_scope('post_check_empty_batch'):
-            hypos = tf.cond(zero_batch, lambda: hypos[:0], lambda: hypos)
-            scores = tf.cond(zero_batch, lambda: scores[:0], lambda: scores)
 
         if return_search_results:
             return hypos, scores
@@ -687,11 +670,17 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
                 old_ended = tf.batch_gather(loop_vars['has_eos'], old_beam_ind)
                 pad_tok = tf.ones([batch_size, beam_size], tf.int32) * pad_id
 
+                # If the sequence length reaches the limit, EOS must come.
+                stopping = tf.tile(tf.greater(cur_pos + 2, maxlens)[:, None], [1,beam_size])
+                eos_tok = tf.fill([batch_size, beam_size], eos_id)
+
                 # Predicted tokens
                 pred = tf.batch_gather(ids, top_ind) # [batch, beam]
 
-                # New token determined out of (init-sequence, padding, predicted) [bat, beam]
-                new_tok = tf.where(is_in_init, cur_init_tok, tf.where(old_ended, pad_tok, pred))
+                # New token to be added
+                new_tok = tf.where(is_in_init, cur_init_tok,
+                    tf.where(old_ended, pad_tok,
+                        tf.where(stopping, eos_tok, pred)))
 
                 # Append new token. [batch, beam, len]->[batch, beam, len+1]
                 new_vars['generated_seq'] = tf.concat([gen_seq, new_tok[:,:, None]], axis=-1)
@@ -753,6 +742,8 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
             'dec_inputs': tf.TensorShape([None, None, None])
         }
 
+    max_iter = tf.cond(tf.equal(batch_size, 0), lambda: -1, lambda: maxlen)
+
     with tf.name_scope('while_loop'):
         finish_state = tf.while_loop(
             cond_fn,
@@ -760,7 +751,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
             [init_loop_vars],
             shape_invariants,
             back_prop=False,
-            maximum_iterations=maxlen,
+            maximum_iterations=max_iter,
             parallel_iterations=2
             )
 
@@ -783,7 +774,16 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
 
         # Fianal sort
         with tf.name_scope('final_sort'):
+            # If batch_size==0, top-k op fails. So add pseudo element.
+            finish_state['score'] = tf.pad(finish_state['score'], [[0,1],[0,0]])
+
+            # Sorting. score: [batch+1, beam], indices: [batch+1, beam]
             score, indices = tf.math.top_k(finish_state['score'], beam_size, sorted=True)
+
+            # Cut off the pseudo element
+            score, indices = score[:-1], indices[:-1]
+
+            # Sort sequences
             seq = tf.batch_gather(finish_state['generated_seq'], indices)
 
         # concat with the prefix and remove the first token (usually <SOS>)
