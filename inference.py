@@ -239,7 +239,7 @@ class Inference:
     def translate_sentences(self, texts, beam_size=1, return_search_results=False, init_y_texts=None):
 
         # Translate
-        batch_capacity = self.batch_capacity // beam_size
+        batch_capacity = 5 * self.batch_capacity // beam_size
         if init_y_texts is None:
             init_y_texts = [''] * len(texts)
 
