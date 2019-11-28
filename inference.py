@@ -10,7 +10,7 @@ from components.utils import *
 from components import dataprocessing
 
 class Inference:
-    def __init__(self, model_dir, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=4, batch_capacity=8192, sampling_method=None):
+    def __init__(self, model_dir, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=4, batch_capacity=None, sampling_method=None):
 
         # Model's working directory
         self.model_dir = model_dir
@@ -42,7 +42,7 @@ class Inference:
         # Computing options
         self.n_cpu_cores = n_cpu_cores
         self.n_gpus = n_gpus
-        self.batch_capacity = batch_capacity or 8192
+        self.batch_capacity = batch_capacity or 8192 * self.n_gpus
 
         # Checkpoint
         self.checkpoint = checkpoint or tf.train.latest_checkpoint(self.logdir + '/sup_checkpoint')
@@ -168,14 +168,17 @@ class Inference:
         
         run_results = []
         start_time = time.time()
+        sys.stderr.write('{} steps\r'.format(len(batches)))
+        sys.stderr.flush()
         for i, batch in enumerate(batches):
             # feed_dict
             feed_dict = self.make_feed_dict(batch)
             if _feed_dict: feed_dict.update(_feed_dict)
 
             run_results.extend(self.session.run(op, feed_dict=feed_dict))
-            sys.stderr.write('{:5.3f} sec/step, steps: {:4}/{:4}\r'.format(
+            sys.stderr.write('{:5.3f} sec/step, steps: {:4}/{:4}\t\r'.format(
                 (time.time() - start_time)/(i + 1), i+1, len(batches)))
+            sys.stderr.flush()
 
         return [sum((x.tolist() for x in items), []) for items in zip(*run_results)]
 
@@ -204,7 +207,7 @@ class Inference:
 
     
     def make_batches(self, x, y, batch_capacity=None):
-        batch_capacity = batch_capacity or self.batch_capacity
+        batch_capacity = batch_capacity or (self.batch_capacity * 5)
         return dataprocessing.make_batches_source_target_const_capacity_batch_from_list(
             x, y, self.params["vocab"]["source_dict"], self.params["vocab"]["target_dict"],
             self.params["vocab"]["UNK_ID"],
