@@ -328,7 +328,8 @@ def main():
             y = [line.strip() for line in f]
 
         if args.mode == PERPLEXITY:
-            print(*inference.calculate_sentence_perplexity(x, y))
+            for p in inference.calculate_sentence_perplexity(x, y):
+                print(p)
         else:
             print(inference.calculate_corpus_perplexity(x, y))
 
