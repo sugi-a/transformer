@@ -40,7 +40,7 @@ class Inference:
         
         # Computing options
         self.n_cpu_cores = n_cpu_cores
-        self.n_gpus = n_gpus
+        self.n_gpus = n_gpus or 1
         self.batch_capacity = batch_capacity or 8192 * self.n_gpus
 
         # Checkpoint
