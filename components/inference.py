@@ -25,16 +25,18 @@ class Inference:
         self.params = self.config["params"]
         params = self.params
 
+        # Vocabulary utility
+        self.vocab = dataprocessing.Vocabulary(
+            params["vocab"]["target_dict"],
+            UNK_ID= params["vocab"]["UNK_ID"],
+            EOS_ID= params["vocab"]["EOS_ID"],
+            PAD_ID= params["vocab"]["PAD_ID"])
+
         # Select the method to convert IDs to tokens
         if 'IDs2text' in self.config:
             self.IDs2text = self.config["IDs2text"]
             logger.debug('Inference using the custom IDs2text method')
         else:
-            self.vocab = dataprocessing.Vocabulary(
-                params["vocab"]["target_dict"],
-                UNK_ID= params["vocab"]["UNK_ID"],
-                EOS_ID= params["vocab"]["EOS_ID"],
-                PAD_ID= params["vocab"]["PAD_ID"])
             self.IDs2text = self.vocab.IDs2text
             logger.debug('Inference using the default IDs2text method')
         
