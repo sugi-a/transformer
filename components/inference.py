@@ -292,6 +292,7 @@ def main():
     parser.add_argument('--batch_capacity', type=int, default=None)
     parser.add_argument('--context_delimiter', type=str, default=None)
     parser.add_argument('--beam_size', type=int, default=1)
+    parser.add_argument('--online', action='store_true')
     args = parser.parse_args()
 
     inference = Inference(
@@ -305,22 +306,39 @@ def main():
     inference.make_session()
 
     if args.mode == TRANSLATE or args.mode == TRANS_DETAIL:
-        if args.context_delimiter is not None:
-            x, y = zip(*(line.split(args.context_delimiter) for line in sys.stdin))
+        def __trans(x ,y):
+            if args.mode == TRANSLATE:
+                for line in inference.translate_sentences(x, args.beam_size, init_y_texts=y):
+                    print(line)
+            else:
+                hyp, score = inference.translate_sentences(x, args.beam_size, True, init_y_texts=y)
+                for _hyp, _score in zip(hyp, score):
+                    for sent,sent_score in zip(_hyp, _score): 
+                        print('{}\t{}'.format(sent_score, sent))
+                    print('')
+            sys.stdout.flush()
+        
+        if args.online:
+            while True:
+                try:
+                    line = sys.stdin.readline()
+                    if len(line) == 0:
+                        exit(0)
+                    if args.context_delimiter is not None:
+                        x, y = line.split(args.context_delimiter)
+                        x, y = [x], [y]
+                    else:
+                        x, y = [line], None
+                    __trans(x, y)
+                except Exception as e:
+                    sys.stderr.write(e)
         else:
-            x, y = [line.strip() for line in sys.stdin], None
-
-        if args.mode == TRANSLATE:
-            for line in inference.translate_sentences(x, args.beam_size, init_y_texts=y):
-                print(line)
-        else:
-            hyp, score = inference.translate_sentences(x, args.beam_size, True, init_y_texts=y)
-            for _hyp, _score in zip(hyp, score):
-                for sent,sent_score in zip(_hyp, _score): 
-                    print('{}\t{}'.format(sent_score, sent))
-                print('')
-
-
+            if args.context_delimiter is not None:
+                x, y = zip(*(line.split(args.context_delimiter) for line in sys.stdin))
+            else:
+                x, y = [line.strip() for line in sys.stdin], None
+            __trans(x, y)
+         
     elif args.mode == PERPLEXITY or args.mode == CORPUS_PERP:
         src_f, trg_f = args.optional[0], args.optional[1]
         with open(src_f, 'r') as f:
