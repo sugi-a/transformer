@@ -2,8 +2,6 @@ import tensorflow as tf
 from tensorflow.contrib.framework import nest
 import numpy as np
 
-from .relative_position import RelativePositionMultiheadSelfAttention
-
 def length_penalty(length, alpha):
     return tf.cast(tf.pow((5 + length)/(1 + 5), alpha), dtype=tf.float32)
 
@@ -109,7 +107,7 @@ def make_attention_bias_triangle(length):
     return (1 - valid_locs) * NEG_INF
 
 
-class MultiheadAttention(tf.layers.Layer):
+class Multihead_attention(tf.layers.Layer):
     def __init__(self, hidden_size, n_heads, dropout_rate=0.1, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.hidden_size = hidden_size
@@ -159,7 +157,7 @@ class MultiheadAttention(tf.layers.Layer):
 
         return outputs
 
-class SelfAttention(MultiheadAttention):
+class SelfAttention(Multihead_attention):
     def call(self, inputs, *args, **kwargs):
         return super().call(inputs, inputs, *args, **kwargs)
 
@@ -217,48 +215,23 @@ class Encoder(tf.layers.Layer):
         self.blocks = []
         for i in range(self.params["network"]["n_blocks"]):
             layer_name = 'layer_{}'.format(i)
-
-            # Self-attention layer
-            if self.params["network"].get("relative_position", False):
-                self_attn = BlockWrapper(
-                    RelativePositionMultiheadSelfAttention(
-                        self.params["network"]["attention_size"],
-                        self.params["network"]["n_heads"],
-                        self.params["network"]["dropout_rate"],
-                        self.params["network"]["max_relative_dist"],
-                        name='{}_{}'.format(layer_name, 'self_attention')),
-                    self.params)
-            else:
-                self_attn = BlockWrapper(
-                    SelfAttention(
-                        self.params["network"]["attention_size"],
-                        self.params["network"]["n_heads"],
-                        self.params["network"]["dropout_rate"],
-                        name='{}_{}'.format(layer_name, 'self_attention')),
-                    self.params)
-
-            # Feedforward layer
-            ff = BlockWrapper(
-                Feedforward(
-                    4 * self.params["network"]["embed_size"],
-                    self.params["network"]["dropout_rate"],
-                    name='{}_{}'.format(layer_name, 'feedforward')),
-                self.params)
-
-            # Register
-            self.blocks.append((self_attn, ff))
-
+            self.blocks.append((
+                BlockWrapper(SelfAttention(self.params["network"]["attention_size"],
+                                                 self.params["network"]["n_heads"],
+                                                 self.params["network"]["dropout_rate"],
+                                                 name='{}_{}'.format(layer_name, 'self_attention')),
+                             self.params),
+                BlockWrapper(Feedforward(4 * self.params["network"]["embed_size"],
+                                         self.params["network"]["dropout_rate"],
+                                         name='{}_{}'.format(layer_name, 'feedforward')),
+                             self.params)
+                        ))
         self.output_norm = Layer_norm()
         super().build(input_shape)
 
     def call(self, inputs, self_attn_bias, training=False):
-        # Embedding
         outputs = self.embedding_layer(inputs)
-        
-        # Positional encoding if not using relative position representation
-        if not self.params["network"].get("relative_position", False):
-            outputs = outputs + positional_encoding(tf.shape(inputs)[1], self.params["network"]["embed_size"])
-
+        outputs = outputs + positional_encoding(tf.shape(inputs)[1], self.params["network"]["embed_size"])
         outputs = tf.layers.dropout(outputs, self.params["network"]["dropout_rate"], training=training)
 
         for self_attn, ff in self.blocks:
@@ -284,46 +257,22 @@ class Decoder(tf.layers.Layer):
         self.blocks = []
         for i in range(self.params["network"]["n_blocks"]):
             layer_name = 'layer_{}'.format(i)
-
-            # Self-attention layer
-            if self.params["network"].get("relative_position", False):
-                self_attn = BlockWrapper(
-                    RelativePositionMultiheadSelfAttention(
-                        self.params["network"]["attention_size"],
-                        self.params["network"]["n_heads"],
-                        self.params["network"]["dropout_rate"],
-                        self.params["network"]["max_relative_dist"],
-                        name='{}_{}'.format(layer_name, 'self_attention')),
-                    self.params)
-            else:
-                self_attn = BlockWrapper(
-                    SelfAttention(
-                        self.params["network"]["attention_size"],
-                        self.params["network"]["n_heads"],
-                        self.params["network"]["dropout_rate"],
-                        name='{}_{}'.format(layer_name, 'self_attention')),
-                    self.params)
-
-            # Dec-Enc attention layer
-            ctx_attn = BlockWrapper(
-                MultiheadAttention(
-                    self.params["network"]["attention_size"],
-                    self.params["network"]["n_heads"],
-                    self.params["network"]["dropout_rate"],
-                    name='{}_{}'.format(layer_name, 'context_attention')),
-                self.params)    
-
-            # Feedforward layer
-            ff = BlockWrapper(
-                Feedforward(
-                    4 * self.params["network"]["embed_size"],
-                    self.params["network"]["dropout_rate"],
-                    name='{}_{}'.format(layer_name, 'feedforward')),
-                self.params)
-
-            # Register
-            self.blocks.append((self_attn, ctx_attn, ff))
-
+            self.blocks.append((
+                BlockWrapper(SelfAttention(self.params["network"]["attention_size"],
+                                                 self.params["network"]["n_heads"],
+                                                 self.params["network"]["dropout_rate"],
+                                                 name='{}_{}'.format(layer_name, 'self_attention')),
+                             self.params),
+                BlockWrapper(Multihead_attention(self.params["network"]["attention_size"],
+                                                 self.params["network"]["n_heads"],
+                                                 self.params["network"]["dropout_rate"],
+                                                 name='{}_{}'.format(layer_name, 'context_attention')),
+                             self.params),
+                BlockWrapper(Feedforward(self.params["network"]["embed_size"] * 4,
+                                         self.params["network"]["dropout_rate"],
+                                         name='{}_{}'.format(layer_name, 'feedforward')),
+                             self.params)
+            ))
 
         self.output_norm = Layer_norm()
 
@@ -342,11 +291,9 @@ class Decoder(tf.layers.Layer):
         # Decoder embedding
         outputs = self.embedding_layer(inputs)
 
-        # Add positional encoding if not using relative position representation
-        if not self.params["network"].get("relative_position", False):
-            # Positional encoding. Take t >= current-front-position
-            outputs = outputs + positional_encoding(
-                seq_end, self.params["network"]["embed_size"])[seq_start:]
+        # Positional encoding. Take t >= current-front-position
+        outputs = outputs + positional_encoding(
+            seq_end, self.params["network"]["embed_size"])[seq_start:]
 
         # Dropout
         outputs = tf.layers.dropout(

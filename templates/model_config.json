@@ -37,9 +37,7 @@
         "embed_size": 512,
         "dropout_rate": 0.1,
         "share_embedding": true,
-        "positional_embedding": false,
-        "relative_position": false,
-        "max_relative_dist": 4
+        "positional_embedding": false
     },
     "vocab": {
         "PAD_ID": 0,
