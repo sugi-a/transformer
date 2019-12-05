@@ -225,7 +225,8 @@ class Encoder(tf.layers.Layer):
                         self.params["network"]["attention_size"],
                         self.params["network"]["n_heads"],
                         self.params["network"]["dropout_rate"],
-                        self.params["network"]["max_relative_dist"],
+                        self.params["network"]["rel_pos_max_dist"],
+                        self.params["network"]["rel_pos_unique_per_head"],
                         name='{}_{}'.format(layer_name, 'self_attention')),
                     self.params)
             else:
@@ -292,7 +293,8 @@ class Decoder(tf.layers.Layer):
                         self.params["network"]["attention_size"],
                         self.params["network"]["n_heads"],
                         self.params["network"]["dropout_rate"],
-                        self.params["network"]["max_relative_dist"],
+                        self.params["network"]["rel_pos_max_dist"],
+                        self.params["network"]["rel_pos_unique_per_head"],
                         name='{}_{}'.format(layer_name, 'self_attention')),
                     self.params)
             else:

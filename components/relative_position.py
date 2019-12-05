@@ -2,7 +2,7 @@ import tensorflow as tf
 
 
 class RelativePositionMultiheadSelfAttention(tf.layers.Layer):
-    def __init__(self, hidden_size, n_heads, dropout_rate, max_relative_dist, *args, **kwargs):
+    def __init__(self, hidden_size, n_heads, dropout_rate, max_relative_dist, unique_per_head, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         assert hidden_size % n_heads == 0
@@ -12,6 +12,7 @@ class RelativePositionMultiheadSelfAttention(tf.layers.Layer):
         self.head_size = self.hidden_size // self.n_heads
         self.dropout_rate = dropout_rate
         self.max_relative_dist = max_relative_dist
+        self.unique_per_head = unique_per_head
 
     
     def build(self, input_shape):
@@ -19,7 +20,14 @@ class RelativePositionMultiheadSelfAttention(tf.layers.Layer):
         self.k_layer = tf.layers.Dense(self.hidden_size, use_bias=False, name='k_layer')
         self.v_layer = tf.layers.Dense(self.hidden_size, use_bias=False, name='v_layer')
         self.att_out_layer = tf.layers.Dense(self.hidden_size, use_bias=False, name='attention_output')
-        self.pos_emb = tf.get_variable('embedding', [self.max_relative_dist * 2 + 1, self.head_size], tf.float32)
+
+        
+        if self.unique_per_head:
+            # [vocab, nheads, head_size]
+            self.pos_emb = tf.get_variable('embedding', [self.max_relative_dist * 2 + 1, self.n_heads, self.head_size], tf.float32)
+        else:
+            # [vocab, head_size]
+            self.pos_emb = tf.get_variable('embedding', [self.max_relative_dist * 2 + 1, self.head_size], tf.float32)
 
         super().build(input_shape)
 
@@ -61,18 +69,17 @@ class RelativePositionMultiheadSelfAttention(tf.layers.Layer):
             # Shift to start from 0
             rel_pos += self.max_relative_dist
 
-            # Make embedding matrix. [q_len, k_len, head_size]
+            # Make embedding matrix. If unique_per_head: [q_len, k_len, head_size], else: [q_len, k_len, nheads, head_size]
             embeddings = tf.gather(self.pos_emb, rel_pos)
 
-            # Make bias matrix. [bat, nheads, q_len, k_len]
-            # q [bat, nheads, q_len, head]->[q_len, bat * nheads, head]
-            _q = tf.transpose(q, [2, 0, 1, 3])
-            _q = tf.reshape(_q, [q_len, -1, self.head_size])
-            # q . emb. [q_len, bat * nheads, k_len]
-            _rel_pos_bias = tf.matmul(_q, embeddings, transpose_b=True)
-            # Restore shape [q_len, bat * nheads, k_len]->[bat, nheads, q_len, k_len]
-            _rel_pos_bias = tf.reshape(_rel_pos_bias, [q_len, -1, self.n_heads, k_len])
-            _rel_pos_bias = tf.transpose(_rel_pos_bias, [1,2,0,3])
+            # Make bias. [batch, nheads, q_len, k_len]
+            if self.unique_per_head:
+                # q: [batch, nheads, q_len, head], emb: [q_len, k_len, nheads, head]
+                _rel_pos_bias = tf.einsum('bnqh,qknh->bnqk', q, embeddings)
+            else:
+                # q: [batch, nheads, q_len, head], emb: [q_len, k_len, head]
+                _rel_pos_bias = tf.einsum('bnqh,qkh->bnqk', q, embeddings)
+
             # Apply relative postion bias to `weight`
             weight += _rel_pos_bias
 
