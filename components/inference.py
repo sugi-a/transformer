@@ -282,8 +282,8 @@ def main():
 
     # arguments
     parser = argparse.ArgumentParser()
+    parser.add_argument('model_dir', type=str)
     parser.add_argument('optional', type=str, nargs='*')
-    parser.add_argument('--model_dir', '--dir', '-d', type=str, required=True)
     parser.add_argument('--mode', type=str, choices=modes, default=TRANSLATE)
     parser.add_argument('--n_gpus', type=int, default=1)
     parser.add_argument('--n_cpu_cores', type=int, default=None)
