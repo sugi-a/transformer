@@ -437,7 +437,8 @@ def main():
 
     # Arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument('model_dir', help='Path to the directory containing `model_config.py`')
+    parser.add_argument('--model_dir', '--dir', '-d', type=str, default='.',
+        help='Path to the directory containing `model_config.py`')
     parser.add_argument('--n_cpu_cores', default=4, type=int,
                         help='Number of cpu cores used by `tf.data.Dataset.map`')
     parser.add_argument('--n_gpus', default=1, type=int,
