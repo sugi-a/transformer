@@ -33,7 +33,7 @@ class Vocabulary:
 
 
 
-def __string2sequence(line, EOS_ID, lookup_table):
+def __string2sequence(line, lookup_table, EOS_ID=None):
     tokens = tf.string_split([line]).values 
     ids = tf.cast(lookup_table.lookup(tokens), tf.int32)
     if EOS_ID is not None:
@@ -47,7 +47,7 @@ def make_dataset_source_target(
                 source_vocab_file_name,
                 target_vocab_file_name,
                 UNK_ID,
-                EOS_ID,
+                EOS_ID=None,
                 shuffle_size=None,
                 ncpu=8):
     """load file into dataset"""
@@ -71,7 +71,7 @@ def make_dataset_source_target(
         dataset = tf.data.Dataset.zip((source_dataset, target_dataset))
     if shuffle_size is not None:
         dataset = dataset.shuffle(shuffle_size)
-    return dataset.map(lambda s,t: (__string2sequence(s, EOS_ID, tables[0]), __string2sequence(t, EOS_ID, tables[1])), ncpu)
+    return dataset.map(lambda s,t: (__string2sequence(s, tables[0], EOS_ID), __string2sequence(t, tables[1], EOS_ID)), ncpu)
 
 def make_source_target_zipped_list(
                 source_list,
@@ -79,8 +79,8 @@ def make_source_target_zipped_list(
                 source_vocab_file_name,
                 target_vocab_file_name,
                 UNK_ID,
-                EOS_ID,
-                PAD_ID):
+                PAD_ID,
+                EOS_ID=None):
     '''
     Args: Mostly the same as make_dataset_source_target.
         batch_capacity: batch's capacity (=shape[0]*shape[1]) doesn't exceed this value.
@@ -208,10 +208,10 @@ def make_batches_source_target_const_capacity_batch_from_list(
                 target_list,
                 source_vocab_file_name,
                 target_vocab_file_name,
-                UNK_ID,
-                EOS_ID,
-                PAD_ID,
                 batch_capacity,
+                UNK_ID,
+                PAD_ID,
+                EOS_ID=None,
                 order_mode=None,
                 allow_skip=False):
     '''
@@ -233,9 +233,14 @@ def make_batches_source_target_const_capacity_batch_from_list(
     if type(source_list) == 'str': source_list = [source_list]
     if type(target_list) == 'str': target_list = [target_list]
     assert len(source_list) == len(target_list)
-    zipped_list = make_source_target_zipped_list(source_list, target_list,
-        source_vocab_file_name, target_vocab_file_name,
-        UNK_ID, EOS_ID, PAD_ID)
+    zipped_list = make_source_target_zipped_list(
+        source_list,
+        target_list,
+        source_vocab_file_name,
+        target_vocab_file_name,
+        UNK_ID,
+        PAD_ID,
+        EOS_ID)
 
     # Make batches
     padded_batches = make_batches_from_zipped_list(zipped_list, PAD_ID, batch_capacity,
@@ -248,10 +253,10 @@ def make_dataset_source_target_const_capacity_batch_from_list(
                 target_list,
                 source_vocab_file_name,
                 target_vocab_file_name,
-                UNK_ID,
-                EOS_ID,
-                PAD_ID,
                 batch_capacity,
+                UNK_ID,
+                PAD_ID,
+                EOS_ID=None,
                 order_mode=None,
                 allow_skip=False):
     '''
@@ -267,13 +272,16 @@ def make_dataset_source_target_const_capacity_batch_from_list(
     '''
     logger.debug('make_dataset_source_target_const_capacity_batch_from_list')
 
-    zipped_list = make_source_target_zipped_list(source_list, target_list,
+    zipped_list = make_source_target_zipped_list(
+        source_list, target_list,
         source_vocab_file_name, target_vocab_file_name,
-        UNK_ID, EOS_ID, PAD_ID)
+        UNK_ID, PAD_ID,
+        EOS_ID=EOS_ID)
 
     # Make batches
     def gen():
-        return make_batches_from_zipped_list(zipped_list,
+        return make_batches_from_zipped_list(
+            zipped_list,
             PAD_ID, batch_capacity, order_mode, allow_skip)
 
     # Make dataset
@@ -320,22 +328,22 @@ def make_dataset_source_target_const_capacity_batch(
         target_lines,
         *args, **kwargs)
 
-def make_dataset_single(file_name, vocab_file_name, UNK_ID, EOS_ID, ncpu=8):
+def make_dataset_single(file_name, vocab_file_name, UNK_ID, EOS_ID=None, ncpu=8):
     table = tf.contrib.lookup.index_table_from_file(
                 vocab_file_name,
                 num_oov_buckets=0,
                 default_value=UNK_ID,
                 key_column_index=0)
     dataset = tf.data.TextLineDataset(file_name)
-    return dataset.map(lambda s: __string2sequence(s, EOS_ID, table), ncpu)
+    return dataset.map(lambda s: __string2sequence(s, table, EOS_ID), ncpu)
 
 
-def make_dataset_single_from_texts(texts, vocab_file_name, UNK_ID, EOS_ID, ncpu=8):
+def make_dataset_single_from_texts(texts, vocab_file_name, UNK_ID, EOS_ID=None, ncpu=8):
     table = tf.contrib.lookup.index_table_from_file(
                 vocab_file_name,
                 num_oov_buckets=0,
                 default_value=UNK_ID,
                 key_column_index=0)
     dataset = tf.data.Dataset.from_tensor_slices(texts)
-    return dataset.map(lambda s: __string2sequence(s, EOS_ID, table), ncpu)
+    return dataset.map(lambda s: __string2sequence(s, table, EOS_ID), ncpu)
 

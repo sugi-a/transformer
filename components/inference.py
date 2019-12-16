@@ -210,11 +210,12 @@ class Inference:
     def make_batches(self, x, y, batch_capacity=None):
         batch_capacity = batch_capacity or (self.batch_capacity * 5)
         return dataprocessing.make_batches_source_target_const_capacity_batch_from_list(
-            x, y, self.params["vocab"]["source_dict"], self.params["vocab"]["target_dict"],
-            self.params["vocab"]["UNK_ID"],
-            self.params["vocab"]["EOS_ID"],
-            self.params["vocab"]["PAD_ID"],
+            x, y,
+            self.params["vocab"]["source_dict"], self.params["vocab"]["target_dict"],
             batch_capacity,
+            self.params["vocab"]["UNK_ID"],
+            self.params["vocab"]["PAD_ID"],
+            EOS_ID=self.params["vocab"]["EOS_ID"],
             allow_skip=False)
 
     def calculate_sentence_perplexity(self, sources, targets):
