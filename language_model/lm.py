@@ -118,7 +118,7 @@ class DecoderLanguageModel(tf.layers.Layer):
         return outputs
 
 
-    def get_logits(self, x, x_len, training=False):
+    def get_logits(self, x, training=False):
         assert self.built
 
         x_shift = tf.concat(
@@ -138,8 +138,7 @@ class DecoderLanguageModel(tf.layers.Layer):
         else:
             with tf.name_scope('dummy_graph'):
                 x = tf.placeholder(tf.int32, [2, None])
-                x_len = tf.placeholder(tf.int32, [10])
-                self(x, x_len)
+                self(x)
 
     def beam_search_decode(self, x, x_len, beam_size, maxlen, sampling_method=None):
         assert self.built
@@ -159,9 +158,9 @@ class DecoderLanguageModel(tf.layers.Layer):
             x_len,
             beam_size,
             maxlen,
-            -1,
+            self.params['vocab']['EOS_ID'],
             self.params['vocab']['PAD_ID'],
-            0,
+            self.params['test']['length_penalty_a'],
             sampling_method=sampling_method)
 
         return hypos

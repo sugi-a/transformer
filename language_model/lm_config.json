@@ -1,0 +1,56 @@
+{
+    "basedir": null,
+    "train": {
+        "batch": {
+            "mode": "random_sliding_window",
+            "config": {
+                "window_size": 512,
+                "batch_size": 64,
+                "drop_window_remainder": false,
+                "shuffle_buf_size": 1000000
+            }
+        },
+        "warm_up_step": 4000,
+        "label_smoothing": 0.1,
+        "stop": {
+            "limit":{
+                "type": "step",
+                "n": 300000
+            },
+            "early_stopping":{
+                "type": "step",
+                "n": 50000,
+                "test_period": 5000
+            }
+        },
+        "data": {
+            "train": [],
+            "dev": ""
+        }
+    },
+    "test": {
+        "length_penalty_a": 0
+    },
+    "network": {
+        "n_blocks": 12,
+        "n_heads": 8,
+        "attention_size": 512,
+        "embed_size": 512,
+        "ff_dim": 2048,
+        "dropout_rate": 0.1,
+        "positional_embedding": false,
+        "relative_position": true,
+        "rel_pos_max_dist": 16,
+        "rel_pos_unique_per_head": false
+    },
+    "vocab": {
+        "PAD_ID": 0,
+        "SOS_ID": 1,
+        "EOS_ID": 2,
+        "UNK_ID": 3,
+        "vocab_size": 16000,
+        "dict": ""
+    }
+    
+}
+
