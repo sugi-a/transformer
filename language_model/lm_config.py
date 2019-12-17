@@ -20,7 +20,7 @@ This file can contain:
 # -------- `params` --------
 # By default, automatically built from `model_config.json`
 
-with open(model_dir + '/' + 'model_config.json') as f:
+with open(model_dir + '/' + 'lm_config.json') as f:
     params = json.load(f)
 
 # Add prefix to the dataset paths. Absolute prefix is recommended.

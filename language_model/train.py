@@ -8,6 +8,7 @@ import numpy as np
 from . import lm, datasetloader
 from ..components.utils import *
 from ..components import dataprocessing
+from ..components.model import label_smoothing
 
 class Train:
     def __init__(self, model_dir, n_gpus=1, n_cpu_cores=4, random_seed=0):
@@ -148,17 +149,17 @@ class Train:
                     (tf.TensorShape([bconf['window_size']]),)) \
                 .shuffle(bconf['shuffle_buf_size']) \
                 .map(lambda x: (x, bconf['window_size'])) \
-                .batch(bconf['batch_size'], False) \
+                .batch(bconf['batch_size'] // self.n_gpus, False) \
                 .prefetch(2 * self.n_gpus)
             else:
                 train_data = tf.data.Dataset.from_generator(
                     train_data_gen,
-                    (tf.int32,),
-                    (tf.TensorShape([None]),)) \
+                    tf.int32,
+                    tf.TensorShape([None])) \
                 .shuffle(bconf['shuffle_buf_size']) \
                 .map(lambda x: (x, tf.shape(x)[0])) \
                 .padded_batch(
-                    bconf['batch_size'],
+                    bconf['batch_size'] // self.n_gpus,
                     (tf.TensorShape([bconf['window_size']]), tf.TensorShape([])),
                     (params['vocab']['PAD_ID'], 0),
                     False) \
@@ -173,11 +174,11 @@ class Train:
 
         dev_data = tf.data.Dataset.from_generator(
                 dev_data_gen,
-                (tf.int32,),
-                (tf.TensorShape([None]),)) \
+                tf.int32,
+                tf.TensorShape([None])) \
             .map(lambda x: (x, tf.shape(x)[0])) \
             .padded_batch(
-                bconf['batch_size'],
+                bconf['batch_size'] // self.n_gpus,
                 (tf.TensorShape([None]), tf.TensorShape([])),
                 (params['vocab']['PAD_ID'], 0),
                 False) \
@@ -257,7 +258,7 @@ class Train:
         init_op = tf.group([tf.tables_initializer(), tf.global_variables_initializer()])
 
         # Session config
-        sess_config = tf.ConfigProto()
+        sess_config = tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True))
         sess_config.allow_soft_placement = True
 
         with tf.Session(config=sess_config) as sess:

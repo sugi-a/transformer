@@ -4,14 +4,14 @@ from tensorflow.contrib.framework import nest
 import numpy as np
 
 from ..components import model
-from ..components import RelativePositionMultiheadSelfAttention
+from ..components.relative_position import RelativePositionMultiheadSelfAttention
 
 class DecoderLanguageModel(tf.layers.Layer):
     MAXLEN = 1024
 
-    def __init__(self, params):
+    def __init__(self, params, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.params = params
-        pass
 
     
     def __layer_name(self, i):
@@ -126,19 +126,17 @@ class DecoderLanguageModel(tf.layers.Layer):
 
         outputs = self.__get_logits_fn(x_shift)
 
+        return outputs
 
-    def call(self, inputs, lengths, training=False):
-        return self.get_logits(inputs, lengths, training)
+
+    def call(self, inputs, training=False):
+        return self.get_logits(inputs, training)
 
 
     def instanciate_vars(self):
-        if self.built:
-            logger.warn('Variables have already created')
-            return
-        else:
-            with tf.name_scope('dummy_graph'):
-                x = tf.placeholder(tf.int32, [2, None])
-                self(x)
+        with tf.name_scope('dummy_graph'):
+            x = tf.placeholder(tf.int32, [2, None])
+            self(x)
 
     def beam_search_decode(self, x, x_len, beam_size, maxlen, sampling_method=None):
         assert self.built
