@@ -19,12 +19,20 @@ class Vocabulary:
         self.ctrls = set(other_control_symbols or []) | {PAD_ID, EOS_ID}
 
 
-    def line2IDs(self, line):
-        return [self.tok2ID.get(tok, self.UNK_ID) for tok in line] + [self.EOS_ID]
+    def tokens2IDs(self, tokens, put_eos=True):
+        ret = [self.tok2ID.get(tok, self.UNK_ID) for tok in tokens]
+        if put_eos:
+            return ret + [self.EOS_ID]
+        else:
+            return ret
 
 
-    def text2IDs(self, text):
-        return list(map(self.line2ID, text))
+    def line2IDs(self, line, put_eos=True):
+        return self.tokens2IDs(line.split(), put_eos)
+
+
+    def text2IDs(self, text, put_eos=True):
+        return [self.line2IDs(line, put_eos) for line in text]
 
 
     def IDs2text(self, IDs):
