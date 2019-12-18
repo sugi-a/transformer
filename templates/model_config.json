@@ -31,13 +31,15 @@
         "length_penalty_a": 1.0
     },
     "network": {
+        "max_length": 512,
         "n_blocks": 6,
         "n_heads": 8,
         "attention_size": 512,
         "embed_size": 512,
         "dropout_rate": 0.1,
         "share_embedding": true,
-        "positional_embedding": false,
+        "pos_encoding": true,
+        "pos_embedding": false,
         "relative_position": false,
         "rel_pos_max_dist": 16,
         "rel_pos_unique_per_head": true
