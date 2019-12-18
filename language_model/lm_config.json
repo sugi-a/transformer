@@ -11,7 +11,7 @@
             }
         },
         "warm_up_step": 4000,
-        "label_smoothing": 0.1,
+        "label_smoothing": 0,
         "stop": {
             "limit":{
                 "type": "step",
@@ -32,13 +32,15 @@
         "length_penalty_a": 0
     },
     "network": {
+        "max_length": 512,
         "n_blocks": 12,
         "n_heads": 8,
         "attention_size": 512,
         "embed_size": 512,
         "ff_dim": 2048,
         "dropout_rate": 0.1,
-        "positional_embedding": false,
+        "pos_encoding": false,
+        "pos_embedding": false,
         "relative_position": true,
         "rel_pos_max_dist": 16,
         "rel_pos_unique_per_head": false

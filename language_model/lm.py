@@ -7,8 +7,6 @@ from ..components import model
 from ..components.relative_position import RelativePositionMultiheadSelfAttention
 
 class DecoderLanguageModel(tf.layers.Layer):
-    MAXLEN = 1024
-
     def __init__(self, params, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.params = params
@@ -19,13 +17,18 @@ class DecoderLanguageModel(tf.layers.Layer):
 
 
     def  build(self, input_shape):
-        self.triangle_bias = model.make_attention_bias_triangle(DecoderLanguageModel.MAXLEN)
+        self.triangle_bias = model.make_attention_bias_triangle(self.params['network']['max_length'])
         self.embedding_layer = model.Embedding_layer(
             self.params['vocab']['vocab_size'],
             self.params['network']['embed_size'])
+
+        if self.params['network']['pos_embedding']:
+            self.pos_emb = tf.get_variable(
+                'pos_emb',
+                [self.params['network']['max_length'], self.params['network']['embed_size']],
+                tf.float32)
         
         self.blocks = []
-
         for i in range(self.params['network']['n_blocks']):
             layer_name = self.__layer_name(i)
 
@@ -93,10 +96,25 @@ class DecoderLanguageModel(tf.layers.Layer):
         # Decoder embedding
         outputs = self.embedding_layer(inputs)
 
-        # Add positional encoding
-        if not self.params['network']['relative_position']:
+        # Position information
+        _pos_info_count = 0
+        if self.params['network']['pos_encoding']:
+            # Positional encoding. Take t >= current-front-position
             outputs = outputs + model.positional_encoding(
-                tail, self.params['network']['embed_size'])[front:]
+                tail, self.params["network"]["embed_size"])[front:]
+            _pos_info_count += 1
+        if self.params['network']['pos_embedding']:
+            _pos_info_count += 1
+            outputs += self.pos_emb[front: tail]
+        if self.params["network"].get("relative_position", False):
+            _pos_info_count += 1
+
+        # Alert if there are more than one position information representation used
+        if _pos_info_count > 1:
+            logger.warn('You are using more than one position info representations in Decoder')
+        elif _pos_info_count == 0:
+            logger.warn('No position info representation is used!')
+
 
         # Dropout
         outputs = tf.layers.dropout(
@@ -141,8 +159,8 @@ class DecoderLanguageModel(tf.layers.Layer):
     def beam_search_decode(self, x, x_len, beam_size, maxlen, sampling_method=None):
         assert self.built
 
-        # Check maxlen <= MAXLEN
-        assert maxlen <= DecoderLanguageModel.MAXLEN
+        # Check maxlen < MAXLEN
+        assert maxlen < self.params['network']['max_length']
 
         # Check init sequence length < maxlen
         tf.assert_less(tf.shape(x)[1], maxlen)
