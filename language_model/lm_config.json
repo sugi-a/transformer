@@ -6,7 +6,7 @@
             "config": {
                 "window_size": 512,
                 "batch_size": 64,
-                "drop_window_remainder": false,
+                "keep_remainder_larger_equal": 50,
                 "shuffle_buf_size": 100000
             }
         },

@@ -135,25 +135,16 @@ class Train:
         if params['train']['batch']['mode'] == 'random_sliding_window':
             bconf = params['train']['batch']['config']
 
+            DATASET_STATE_FILE = os.path.join(self.logdir, 'train_data_loading_state.json')
             train_data_gen = datasetloader.RandomSlidingWindow(
                 params['train']['data']['train'],
                 self.vocab,
                 bconf['window_size'],
-                drop_remainder=bconf['drop_window_remainder'],
-                random=True)
+                keep_remainder_larger_equal=bconf['keep_remainder_larger_equal'],
+                random=True,
+                state_log_file=DATASET_STATE_FILE)
 
-            if bconf['drop_window_remainder']:
-                # This might be more efficient because it doesn't need padding
-                train_data = tf.data.Dataset.from_generator(
-                    train_data_gen,
-                    (tf.int32,),
-                    (tf.TensorShape([bconf['window_size']]),)) \
-                .shuffle(bconf['shuffle_buf_size']) \
-                .map(lambda x: (x, bconf['window_size'])) \
-                .batch(bconf['batch_size'] // self.n_gpus, False) \
-                .prefetch(2 * self.n_gpus)
-            else:
-                train_data = tf.data.Dataset.from_generator(
+            train_data = tf.data.Dataset.from_generator(
                     train_data_gen,
                     tf.int32,
                     tf.TensorShape([None])) \
@@ -165,13 +156,15 @@ class Train:
                     (params['vocab']['PAD_ID'], 0),
                     False) \
                 .prefetch(2 * self.n_gpus)
+        else:
+            assert False
 
         # dev dataset
         dev_data_gen = datasetloader.RandomSlidingWindow(
             [params['train']['data']['dev']],
             self.vocab,
             bconf['window_size'],
-            drop_remainder=False,
+            keep_remainder_larger_equal=1,
             random=False)
 
         dev_data = tf.data.Dataset.from_generator(
