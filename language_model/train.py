@@ -139,7 +139,8 @@ class Train:
                 params['train']['data']['train'],
                 self.vocab,
                 bconf['window_size'],
-                bconf['drop_window_remainder'])
+                drop_remainder=bconf['drop_window_remainder'],
+                random=True)
 
             if bconf['drop_window_remainder']:
                 # This might be more efficient because it doesn't need padding
@@ -170,7 +171,8 @@ class Train:
             [params['train']['data']['dev']],
             self.vocab,
             bconf['window_size'],
-            True)
+            drop_remainder=False,
+            random=False)
 
         dev_data = tf.data.Dataset.from_generator(
                 dev_data_gen,

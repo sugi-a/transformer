@@ -3,11 +3,12 @@ from collections import deque
 
 
 class RandomSlidingWindow:
-    def __init__(self, files, vocab, window_size, drop_remainder=True):
+    def __init__(self, files, vocab, window_size, drop_remainder=True, random=True):
         self.files = files
         self.vocab = vocab
         self.window_size = window_size
         self.drop_remainder = drop_remainder
+        self.random = random
 
 
     def __iter__(self):
@@ -25,9 +26,8 @@ class RandomSlidingWindow:
             with open(fn) as f:
                 q = deque()
 
-                # Window size is randomly initialized
-                win_size = random.randint(1, self.window_size)
-
+                # if self.random, window size is randomly initialized
+                win_size = random.randint(1, self.window_size) if self.random else self.window_size
                 for line in f:
                     # Check the document boundaries
                     if len(line) == 1:
