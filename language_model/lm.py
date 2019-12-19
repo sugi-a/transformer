@@ -111,9 +111,9 @@ class DecoderLanguageModel(tf.layers.Layer):
 
         # Alert if there are more than one position information representation used
         if _pos_info_count > 1:
-            logger.warn('You are using more than one position info representations in Decoder')
+            logger.warning('You are using more than one position info representations in Decoder')
         elif _pos_info_count == 0:
-            logger.warn('No position info representation is used!')
+            logger.warning('No position info representation is used!')
 
 
         # Dropout
