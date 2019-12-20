@@ -29,7 +29,7 @@ if 'basedir' in params:
     for i in range(len(params["train"]["data"]["train"])):
         params["train"]["data"]["train"][i] = os.path.join(_p, params["train"]["data"]["train"][i])
     params["train"]["data"]["dev"] = os.path.join(_p, params["train"]["data"]["dev"])
-    params["vocab"]["dict"] = os.path.join(_p, params["vocab"]["source_dict"])
+    params["vocab"]["dict"] = os.path.join(_p, params["vocab"]["dict"])
 
 
 # -------- methods --------
