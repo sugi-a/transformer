@@ -121,3 +121,37 @@ class RandomSlidingWindow:
         self.state['shuffled_files'] = None
         self.state['data_count'] = None
         
+
+
+def make_const_capacity_batch_list(data, lengths, capacity, PAD_ID):
+    assert all(l < capacity for l in lengths)
+
+    ret = []
+    batch = []
+    batch_len = []
+
+    mlen = 0
+    for d, l in zip(data, lengths):
+        if max(mlen, l) * (len(batch) + 1) > capacity:
+            if batch:
+                ret.append((batch, batch_len))
+                batch = []
+                batch_len = []
+                mlen = 0
+
+        mlen = max(mlen, l)
+
+        batch.append(d)
+        batch_len.append(l)
+
+    if batch:
+        ret.append((batch, batch_len))
+
+    # Padding
+    for batch, batch_len in ret:
+        maxlen = max(batch_len)
+        for i in range(len(batch)):
+            batch[i] = batch[i] + [PAD_ID] * (maxlen - len(batch[i]))
+
+    return ret
+
