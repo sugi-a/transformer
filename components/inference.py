@@ -316,7 +316,6 @@ def main():
                 for _hyp, _score in zip(hyp, score):
                     for sent,sent_score in zip(_hyp, _score): 
                         print('{}\t{}'.format(sent_score, sent))
-                    print('')
             sys.stdout.flush()
         
         if args.online:
