@@ -287,7 +287,7 @@ def main():
     parser.add_argument('--mode', type=str, choices=modes, default=TRANSLATE)
     parser.add_argument('--n_gpus', type=int, default=1)
     parser.add_argument('--n_cpu_cores', type=int, default=None)
-    parser.add_argument('--sampling_method', type=str, default=None)
+    parser.add_argument('--sampling_method', type=int, default=None)
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--batch_capacity', type=int, default=None)
     parser.add_argument('--context_delimiter', type=str, default=None)

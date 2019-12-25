@@ -650,7 +650,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
                 elif sampling_method == KEY_SAMPLING:
                     # Random sampling based on probability distribution
                     ids = tf.random.multinomial(logits, beam_size) # [bat*beam, beam]
-                    ids = tf.cast(ids, tf.int32)[:, None] # [bat*beam, beam]
+                    ids = tf.cast(ids, tf.int32)
                     top_logits = tf.batch_gather(logits, ids) # [bat*beam, beam]
                 else:
                     assert False
