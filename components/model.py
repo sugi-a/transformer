@@ -1,3 +1,4 @@
+from logging import getLogger; logger = getLogger(__file__)
 import tensorflow as tf
 from tensorflow.contrib.framework import nest
 import numpy as np
@@ -212,9 +213,16 @@ class Encoder(tf.layers.Layer):
         self.embedding_layer = Embedding_layer(
             self.params["vocab"]["vocab_size"], self.params["network"]["embed_size"])
 
+
     def build(self, input_shape):
+        if self.params['network']['pos_embedding']:
+            self.pos_emb = tf.get_variable(
+                'pos_emb',
+                [self.params['network']['max_length'], self.params['network']['embed_size']],
+                tf.float32)
 
         self.blocks = []
+        
         for i in range(self.params["network"]["n_blocks"]):
             layer_name = 'layer_{}'.format(i)
 
@@ -253,12 +261,28 @@ class Encoder(tf.layers.Layer):
         super().build(input_shape)
 
     def call(self, inputs, self_attn_bias, training=False):
-        # Embedding
+        # Embedding [batch, length, emb_size]
         outputs = self.embedding_layer(inputs)
         
-        # Positional encoding if not using relative position representation
-        if not self.params["network"].get("relative_position", False):
-            outputs = outputs + positional_encoding(tf.shape(inputs)[1], self.params["network"]["embed_size"])
+        # Position information
+        _pos_info_count = 0
+        if self.params['network']['pos_encoding']:
+            _pos_info_count += 1
+            outputs += positional_encoding(
+                tf.shape(inputs)[1],
+                self.params["network"]["embed_size"])
+        if self.params['network']['pos_embedding']:
+            _pos_info_count += 1
+            outputs += self.pos_emb[:tf.shape(inputs)[1]]
+        if self.params["network"].get("relative_position", False):
+            _pos_info_count += 1
+        # Alert if there are more than one position information representation used
+        if _pos_info_count > 1:
+            logger.warning('You are using more than one position info representations in Encoder')
+        elif _pos_info_count == 0:
+            logger.warning('No position information representation is used in Encoder')
+        
+
 
         outputs = tf.layers.dropout(outputs, self.params["network"]["dropout_rate"], training=training)
 
@@ -281,6 +305,12 @@ class Decoder(tf.layers.Layer):
             # if the embedding layer is owned by another Layer it must be built until now
             # in order to avoid ambiguous variable scope tree
             assert self.embedding_layer.built
+
+        if self.params['network']['pos_embedding']:
+            self.pos_emb = tf.get_variable(
+                'pos_emb',
+                [self.params['network']['max_length'], self.params['network']['embed_size']],
+                tf.float32)
         
         self.blocks = []
         for i in range(self.params["network"]["n_blocks"]):
@@ -344,11 +374,24 @@ class Decoder(tf.layers.Layer):
         # Decoder embedding
         outputs = self.embedding_layer(inputs)
 
-        # Add positional encoding if not using relative position representation
-        if not self.params["network"].get("relative_position", False):
+        # Position information
+        _pos_info_count = 0
+        if self.params['network']['pos_encoding']:
             # Positional encoding. Take t >= current-front-position
             outputs = outputs + positional_encoding(
                 seq_end, self.params["network"]["embed_size"])[seq_start:]
+            _pos_info_count += 1
+        if self.params['network']['pos_embedding']:
+            _pos_info_count += 1
+            outputs += self.pos_emb[seq_start:seq_end]
+        if self.params["network"].get("relative_position", False):
+            _pos_info_count += 1
+
+        # Alert if there are more than one position information representation used
+        if _pos_info_count > 1:
+            logger.warning('You are using more than one position info representations in Decoder')
+        elif _pos_info_count == 0:
+            logger.warning('No position information representation is used in Decoder')
 
         # Dropout
         outputs = tf.layers.dropout(
@@ -388,7 +431,6 @@ class Decoder(tf.layers.Layer):
 
 
 class Transformer(tf.layers.Layer):
-    MAXLEN = 1024
     def __init__(self, params, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.params = params
@@ -400,7 +442,7 @@ class Transformer(tf.layers.Layer):
         else:
             self.decoder = Decoder(self.params, name='decoder')
 
-        self.triangle_bias = make_attention_bias_triangle(Transformer.MAXLEN)
+        self.triangle_bias = make_attention_bias_triangle(self.params['network']['max_length'] + 10)
         
         super().build(input_shape)
 
@@ -511,7 +553,7 @@ class Transformer(tf.layers.Layer):
                 init_seq_len = init_y_len
 
         # Maximum target length
-        maxlens = tf.minimum(Transformer.MAXLEN - 10, x_len * 3 + 10)
+        maxlens = tf.minimum(self.params['network']['max_length'] - 10, x_len * 3 + 10)
 
         hypos, scores = beam_search_decode(self.__get_logits_fn,
                                                      cache,

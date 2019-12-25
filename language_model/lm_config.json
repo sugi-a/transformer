@@ -2,13 +2,16 @@
     "basedir": null,
     "train": {
         "batch": {
-            "fixed_capacity": true,
-            "size": 128,
-            "capacity": 8192,
-            "sort": true
+            "mode": "random_sliding_window",
+            "config": {
+                "window_size": 512,
+                "batch_size": 64,
+                "keep_remainder_larger_equal": 50,
+                "shuffle_buf_size": 100000
+            }
         },
         "warm_up_step": 4000,
-        "label_smoothing": 0.1,
+        "label_smoothing": 0,
         "stop": {
             "limit":{
                 "type": "step",
@@ -17,32 +20,30 @@
             "early_stopping":{
                 "type": "step",
                 "n": 50000,
-                "test_period": 4000
+                "test_period": 5000
             }
         },
         "data": {
-            "source_train": [],
-            "target_train": [],
-            "source_dev": "",
-            "target_dev": ""
+            "train": [],
+            "dev": ""
         }
     },
     "test": {
-        "length_penalty_a": 1.0
+        "length_penalty_a": 0
     },
     "network": {
         "max_length": 512,
-        "n_blocks": 6,
+        "n_blocks": 12,
         "n_heads": 8,
         "attention_size": 512,
         "embed_size": 512,
+        "ff_dim": 2048,
         "dropout_rate": 0.1,
-        "share_embedding": true,
-        "pos_encoding": true,
+        "pos_encoding": false,
         "pos_embedding": false,
-        "relative_position": false,
+        "relative_position": true,
         "rel_pos_max_dist": 16,
-        "rel_pos_unique_per_head": true
+        "rel_pos_unique_per_head": false
     },
     "vocab": {
         "PAD_ID": 0,
@@ -50,8 +51,7 @@
         "EOS_ID": 2,
         "UNK_ID": 3,
         "vocab_size": 16000,
-        "source_dict": "",
-        "target_dict": ""
+        "dict": ""
     }
     
 }
