@@ -189,6 +189,13 @@ class Inference:
         return perp
 
 
+    def calculate_log_prob(self, x):
+        batches = self.make_batches(x)
+        sent_perp, = self.execute_op(self.op_perplexity, batches)
+        sent_lens = np.array(sum((batch[1] for batch in batches), []))
+        logprob = - np.log(sent_perp) * sent_lens
+        return logprob
+
 
 def main():
     # logger
@@ -197,7 +204,8 @@ def main():
     # mode keys
     PERPLEXITY = 'perplexity'
     CORPUS_PERP = 'corpus_perplexity'
-    modes = [PERPLEXITY, CORPUS_PERP]
+    LOG_PROB = 'log_prob'
+    modes = [PERPLEXITY, CORPUS_PERP, LOG_PROB]
 
     # arguments
     parser = argparse.ArgumentParser()
@@ -218,14 +226,17 @@ def main():
 
     inference.make_session()
 
-    if args.mode == PERPLEXITY or args.mode == CORPUS_PERP:
+    if args.mode == PERPLEXITY or args.mode == CORPUS_PERP or args.mode == LOG_PROB:
         x = [line.strip() for line in sys.stdin]
 
         if args.mode == PERPLEXITY:
             for p in inference.calculate_sentence_perplexity(x):
                 print(p)
-        else:
+        elif args.mode == CORPUS_PERP:
             print(inference.calculate_corpus_perplexity(x))
+        elif args.mode == LOG_PROB:
+            for p in inference.calculate_log_prob(x):
+                print(p)
 
 
 if __name__ == '__main__':
