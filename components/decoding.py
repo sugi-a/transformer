@@ -1,3 +1,4 @@
+import sys
 from logging import getLogger; logger = getLogger(__name__)
 import tensorflow as tf
 from tensorflow.contrib.framework import nest
@@ -138,7 +139,10 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
                     # a fixed diversity rate.
                     top_logits, ids = tf.math.top_k(logits, beam_size, False, name='pre_tops') 
                     diversify_bias = tf.cast(tf.range(beam_size), tf.float32) * params["diversity_rate"]
-                    top_logits -= diversify_bias[None]
+                    top_logits = tf.cond(
+                        tf.equal(tf.shape(loop_vars['generated_seq'])[2], 0),
+                        lambda: top_logits,
+                        lambda: top_logits - diversify_bias[None])
                 else:
                     assert False
 
