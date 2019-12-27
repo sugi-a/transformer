@@ -28,7 +28,10 @@
         }
     },
     "test": {
-        "length_penalty_a": 1.0
+        "length_penalty_a": 1.0,
+        "decode_config":{
+            "sampling_method": 0
+        }
     },
     "network": {
         "max_length": 512,

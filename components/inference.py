@@ -1,15 +1,16 @@
-import argparse, sys, os, time
+import argparse, sys, os, time, json
 import tensorflow as tf
 import numpy as np
 from logging import getLogger, INFO, DEBUG, basicConfig
 logger = getLogger(__name__)
 
 from .model import *
-from .utils import *
+from .utils import compute_parallel, merge_nested_dict
 from . import dataprocessing
+from .decoding import BeamSearchKeys
 
 class Inference:
-    def __init__(self, model_dir, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=4, batch_capacity=None, sampling_method=None):
+    def __init__(self, model_dir, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=4, batch_capacity=None, decode_config=None):
 
         # Model's working directory
         self.model_dir = model_dir
@@ -24,6 +25,11 @@ class Inference:
         
         self.params = self.config["params"]
         params = self.params
+
+        # Merging the default decoding setting and the one specified at runtime.
+        if not 'decode_config' in params['test']:
+            params['test']['decode_config'] = {}
+        merge_nested_dict(params['test'], decode_config)
 
         # Vocabulary utility
         self.vocab = dataprocessing.Vocabulary(
@@ -86,8 +92,10 @@ class Inference:
             
             # computation graph for beam search
             self.ph_beam_size = tf.placeholder(tf.int32, [])
-            self.sampling_method = sampling_method
-            self.op_beam_hypos_scores = self.make_op(self.fn_beam_search)
+            self.op_beam_hypos_scores = self.make_op(
+                self.fn_beam_search,
+                self.ph_beam_size,
+                decode_config=decode_config)
 
             # Computation graph for perplexity
             self.op_perplexity = self.make_op(self.fn_perplexity)
@@ -96,16 +104,16 @@ class Inference:
             self.ph_length_penalty = tf.placeholder(tf.float64, [])
             self.op_trans_score = self.make_op(self.fn_translation_score)
 
-    def fn_beam_search(self, inputs):
+    def fn_beam_search(self, inputs, ph_beam_size, decode_config):
         (x, x_len), (init_y, init_y_len) = inputs
         beam_candidates, scores = self.model.decode(
             x,
             x_len,
-            self.ph_beam_size,
+            ph_beam_size,
             return_search_results=True,
             init_y=init_y,
             init_y_len=init_y_len,
-            sampling_method=self.sampling_method)
+            decode_config=decode_config)
         return beam_candidates, scores
 
     def fn_perplexity(self, inputs):
@@ -139,7 +147,7 @@ class Inference:
         
         return [score]
 
-    def make_op(self, fn):
+    def make_op(self, fn, *args, **kwargs):
         """Create operation which computes the function specified with GPU(s) in parallel.
         Args:
             fn:
@@ -148,7 +156,7 @@ class Inference:
         Returns:
             list of replicated operations to be computed in parallel.
             """
-        return compute_parallel(fn, self.inputs_parallel)
+        return compute_parallel(fn, self.inputs_parallel, *args, **kwargs)
 
     def make_feed_dict(self, batch):
         return {self.ph_dict['x']: batch[0][0],
@@ -288,7 +296,7 @@ def main():
     parser.add_argument('--mode', type=str, choices=modes, default=TRANSLATE)
     parser.add_argument('--n_gpus', type=int, default=1)
     parser.add_argument('--n_cpu_cores', type=int, default=None)
-    parser.add_argument('--sampling_method', type=int, default=None)
+    parser.add_argument('--decode-config-json', '--config', '-c', type=str, default=None)
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--batch_capacity', type=int, default=None)
     parser.add_argument('--context_delimiter', type=str, default=None)
@@ -296,13 +304,15 @@ def main():
     parser.add_argument('--online', action='store_true')
     args = parser.parse_args()
 
+    dec_conf = json.loads(args.decode_config_json) if args.decode_config_json else None
+
     inference = Inference(
         args.model_dir,
         checkpoint = args.checkpoint,
         n_gpus = args.n_gpus,
         n_cpu_cores = args.n_cpu_cores,
         batch_capacity = args.batch_capacity,
-        sampling_method = args.sampling_method)
+        decode_config = dec_conf)
 
     inference.make_session()
 
