@@ -5,9 +5,9 @@ from logging import getLogger, INFO, DEBUG, basicConfig
 logger = getLogger(__name__)
 
 from .model import *
-from .utils import compute_parallel, merge_nested_dict
+from .utils import compute_parallel, merge_nested_dict, non_even_split
 from . import dataprocessing
-from .decoding import BeamSearchKeys
+from .decoding import BeamSearchKeys, length_penalty
 
 class Inference:
     def __init__(self, model_dir, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=4, batch_capacity=None, decode_config=None):
@@ -245,7 +245,7 @@ class Inference:
         if length_penalty_a is None:
             length_penalty_a = self.params["test"]["length_penalty_a"]
         batches = self.make_batches(sources, targets)
-        scores = self.execute_op(self.op_trans_score, batches, {self.ph_length_penalty: length_penalty_a})
+        scores, = self.execute_op(self.op_trans_score, batches, {self.ph_length_penalty: length_penalty_a})
         return scores
 
 
@@ -287,7 +287,8 @@ def main():
     PERPLEXITY = 'perplexity'
     CORPUS_PERP = 'corpus_perplexity'
     TRANS_DETAIL = 'translate_detail'
-    modes = [TRANSLATE, PERPLEXITY, CORPUS_PERP, TRANS_DETAIL]
+    TRANS_SCORE = 'trans_score'
+    modes = [TRANSLATE, PERPLEXITY, CORPUS_PERP, TRANS_DETAIL, TRANS_SCORE]
 
     # arguments
     parser = argparse.ArgumentParser()
@@ -349,7 +350,7 @@ def main():
                 x, y = [line.strip() for line in sys.stdin], None
             __trans(x, y)
          
-    elif args.mode == PERPLEXITY or args.mode == CORPUS_PERP:
+    elif args.mode == PERPLEXITY or args.mode == CORPUS_PERP or args.mode == TRANS_SCORE:
         src_f, trg_f = args.optional[0], args.optional[1]
         with open(src_f, 'r') as f:
             x = [line.strip() for line in f]
@@ -359,6 +360,9 @@ def main():
         if args.mode == PERPLEXITY:
             for p in inference.calculate_sentence_perplexity(x, y):
                 print(p)
+        elif args.mode == TRANS_SCORE:
+            for s in inference.calculate_translation_score(x, y):
+                print(s)
         else:
             print(inference.calculate_corpus_perplexity(x, y))
 
