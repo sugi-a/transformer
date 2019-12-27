@@ -144,3 +144,28 @@ def tf_restorable_vars(checkpoint, var_list=None, unexist_ok=None):
         assert False
             
     return ret, ignored
+
+
+def merge_nested_dict(a, b):
+    """Merges b into a.
+    Args:
+        a: nested structure of list and dict
+        b: same as above
+    Returns:
+        a which has been mutated.
+        The merge rules are as follows:
+            - b's elements replace the counterparts of a
+        """
+    if b is None:
+        return a
+
+    assert isinstance(b, dict)
+    
+    for key, value in b.items():
+        if isinstance(a.get(key, None), dict):
+            assert isinstance(value, dict)
+            merge_nested_dict(a[key], value)
+        else:
+            a[key] = value
+
+    return a
