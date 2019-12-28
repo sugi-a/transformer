@@ -279,7 +279,7 @@ class Train:
             # - periodic saver
             saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)
             # - max validation score saver
-            sup_saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)
+            sup_saver = tf.train.Saver(tf.trainable_variables(), max_to_keep=1)
 
             # step and epoch
             global_step = global_step_var.eval()
