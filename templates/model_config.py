@@ -24,15 +24,17 @@ with open(model_dir + '/' + 'model_config.json') as f:
     params = json.load(f)
 
 # Add prefix to the dataset paths. Absolute prefix is recommended.
-if 'basedir' in params: 
-    _p = params["basedir"] + '/'
-    for k in ["source_train", "target_train"]:
-        for i in range(len(params["train"]["data"][k])):
-            params["train"]["data"][k][i] = _p + params["train"]["data"][k][i]
-    params["train"]["data"]["source_dev"] = _p + params["train"]["data"]["source_dev"]
-    params["train"]["data"]["target_dev"] = _p + params["train"]["data"]["target_dev"]
-    params["vocab"]["source_dict"] = _p + params["vocab"]["source_dict"]
-    params["vocab"]["target_dict"] = _p + params["vocab"]["target_dict"]
+if params["basedir"] is None:
+    params["basedir"] = model_dir
+
+_p = params['basedir'] + '/'
+for k in ["source_train", "target_train"]:
+    for i in range(len(params["train"]["data"][k])):
+        params["train"]["data"][k][i] = _p + params["train"]["data"][k][i]
+params["train"]["data"]["source_dev"] = _p + params["train"]["data"]["source_dev"]
+params["train"]["data"]["target_dev"] = _p + params["train"]["data"]["target_dev"]
+params["vocab"]["source_dict"] = _p + params["vocab"]["source_dict"]
+params["vocab"]["target_dict"] = _p + params["vocab"]["target_dict"]
 
 
 # -------- methods --------
