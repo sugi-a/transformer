@@ -49,7 +49,7 @@ validation_metric(global_step, inference)
 """
 import sentencepiece as spm
 sp = spm.SentencePieceProcessor()
-sp.Load(params["vocab"]["source_dict"][:-len("vocab")] + "model")
+sp.Load(params["vocab"]["target_dict"][:-len("vocab")] + "model")
 
 def IDs2text(IDs):
     '''
