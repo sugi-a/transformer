@@ -197,15 +197,24 @@ class Inference:
         return logprob
 
 
+    def calculate_pmi(self, context, x):
+        """PMI(context, x) = log p(context^x) - log p(context) - log p(x)"""
+        assert len(context) == len(x)
+        n = len(context)
+        probs = self.calculate_log_prob([c + ' ' + _x for c, _x in zip(context, x)] + context + x)
+        return probs[:n] - probs[n:n * 2] - probs[n*2:]
+
+
 def main():
     # logger
     basicConfig(level=INFO)
 
     # mode keys
-    PERPLEXITY = 'perplexity'
-    CORPUS_PERP = 'corpus_perplexity'
+    PERPLEXITY = 'ppl'
+    CORPUS_PERP = 'corpus_ppl'
     LOG_PROB = 'log_prob'
-    modes = [PERPLEXITY, CORPUS_PERP, LOG_PROB]
+    PMI = 'pmi'
+    modes = [PERPLEXITY, CORPUS_PERP, LOG_PROB, PMI]
 
     # arguments
     parser = argparse.ArgumentParser()
@@ -215,6 +224,10 @@ def main():
     parser.add_argument('--n_cpu_cores', type=int, default=None)
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--batch_capacity', type=int, default=None)
+
+    # for PMI
+    parser.add_argument('--context', '-c', type=str, default=None)
+    parser.add_argument('--sentence', '-x', type=str, default=None)
     args = parser.parse_args()
 
     inference = Inference(
@@ -237,6 +250,14 @@ def main():
         elif args.mode == LOG_PROB:
             for p in inference.calculate_log_prob(x):
                 print(p)
+    elif args.mode == PMI:
+        with open(args.context) as f:
+            context = f.readlines()
+        with open(args.sentence) as f:
+            sentence = f.readlines()
+        
+        for p in inference.calculate_pmi(context, sentence):
+            print(p)
 
 
 if __name__ == '__main__':
