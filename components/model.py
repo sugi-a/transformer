@@ -443,18 +443,18 @@ class Transformer(tf.layers.Layer):
         
         super().build(input_shape)
 
-    def call(self, inputs, lengths, dec_inputs, dec_lengths, training=False):
-        # this method is called only by self.instantiate to instantiate variables of this Layer
+    
+    def make_cache(self, x, x_len, training, layer_cache=False):
         with tf.name_scope('enc_self_attn_bias'):
-            enc_self_attn_bias = make_self_attn_bias(lengths, tf.shape(inputs)[1])
-        enc_outputs = self.encoder(inputs, enc_self_attn_bias, training=training)
+            enc_self_attn_bias = make_self_attn_bias(x_len, tf.shape(x)[1])
+        enc_outputs = self.encoder(x, enc_self_attn_bias, training=training)
 
-        with tf.name_scope('dec_self_attn_bias'):
-            dec_self_attn_bias = make_attention_bias_triangle(tf.shape(dec_inputs)[1])
+        return self.decoder.make_cache(enc_outputs, enc_self_attn_bias, layer_cache=layer_cache)
 
-        cache = self.decoder.make_cache(enc_outputs, enc_self_attn_bias)
-        dec_outputs = self.decoder(dec_inputs, dec_self_attn_bias, cache, training=training)
-        return dec_outputs
+
+    def call(self, x, x_len, y, y_len, training=False):
+        # this method is called only by self.instantiate to instantiate variables of this Layer
+        return self.get_logits(x, y, x_len, y_len, training=training)
 
     def instanciate_vars(self):
         """create dummy graph instance of this Layer in order to place variables in a specific device."""
@@ -468,7 +468,7 @@ class Transformer(tf.layers.Layer):
         self(x, x_len, y, y_len)
 
 
-    def __get_logits_fn(self, dec_inputs, cache):
+    def __get_logits_fn(self, dec_inputs, cache, training=False):
         if 'layer_0' in cache:
             """
             decoder self-attention is from dec_inputs (shape [batch, n, emb])
@@ -503,21 +503,13 @@ class Transformer(tf.layers.Layer):
         Returns:
             """
         assert self.built
-        enc_self_attn_bias = make_self_attn_bias(x_len, tf.shape(x)[1])
-        enc_outputs = self.encoder(x, enc_self_attn_bias, training=training)
-
-        #dec_self_attn_bias = make_attention_bias_triangle(tf.shape(y)[1])
-        dec_self_attn_bias = self.triangle_bias[:, :, :tf.shape(y)[1], :tf.shape(y)[1]]
-        
-        # add SOS to the beginning and remove the last token
+        # add SOS to the beginning and remove the last token EOS
         dec_inputs = tf.concat(
             [tf.fill([tf.shape(y)[0], 1], self.params["vocab"]["SOS_ID"]), y[:, :-1]], axis=1)
 
-        # Build decoder graph
-        cache = self.decoder.make_cache(enc_outputs, enc_self_attn_bias, False)
-        dec_outputs = self.decoder(dec_inputs, dec_self_attn_bias, cache, training=training)
+        cache = self.make_cache(x, x_len, training, False)
 
-        return dec_outputs
+        return self.__get_logits_fn(dec_inputs, cache, training=training)
 
     def decode(self, x, x_len, beam_size=8, return_search_results=False, init_y=None, init_y_len=None, decode_config=None):
         """Given inputs x, this method produces translation candidates by beam search
@@ -532,20 +524,15 @@ class Transformer(tf.layers.Layer):
             [batch, beam_size]) is returned. Otherwise a Tensor [batch, length] is returned."""
 
         assert self.built
-
-        # Build encoder graph
-        with tf.name_scope('enc_self_attn_bias'):
-            enc_self_attn_bias = make_self_attn_bias(x_len, tf.shape(x)[1])
-        enc_outputs = self.encoder(x, enc_self_attn_bias, training=False)
-
         # initial cache
         with tf.name_scope('init_cache'):
-            cache = self.decoder.make_cache(enc_outputs, enc_self_attn_bias, True)
+            cache = self.make_cache(x, x_len, training=False, layer_cache=True)
 
         # Initial sequence
         with tf.name_scope('define_init_sequence'):
             init_seq = tf.fill([tf.shape(x)[0], 1], self.params["vocab"]["SOS_ID"])
             if init_y is not None:
+                # Remove the last token since it's EOS
                 init_seq = tf.concat([init_seq, init_y], axis=1)[:, :-1]
                 init_seq_len = init_y_len
 
