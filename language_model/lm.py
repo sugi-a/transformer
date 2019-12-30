@@ -69,8 +69,7 @@ class DecoderLanguageModel(tf.layers.Layer):
         super().build(input_shape)
 
 
-    def make_cache(self, x):
-        batch_size = tf.shape(x)[0]
+    def make_cache(self, batch_size):
         
         for i in range(self.params['network']['n_blocks']):
             layer_name = self.__layer_name(i)
@@ -165,7 +164,12 @@ class DecoderLanguageModel(tf.layers.Layer):
         # Check init sequence length < maxlen
         tf.assert_less(tf.shape(x)[1], maxlen)
 
-        cache = self.make_cache(x) 
+        cache = self.make_cache(tf.shape(x)[0]) 
+
+        # Add SOS to the head. 
+        # Note: No need to remove the last token since it's not EOS
+        x = tf.concat([tf.fill([tf.shape(x)[0], 1], self.params['vocab']['SOS_ID']), x, axis=1)
+        x_len += 1
         
         hypos, scores = model.beam_search_decode(
             self.__get_logits_fn,
