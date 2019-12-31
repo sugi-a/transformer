@@ -539,16 +539,16 @@ class Transformer(tf.layers.Layer):
         # Maximum target length
         maxlens = tf.minimum(self.params['network']['max_length'] - 10, x_len * 3 + 10)
 
-        hypos, scores = beam_search_decode(self.__get_logits_fn,
-                                                     cache,
-                                                     init_seq,
-                                                     init_seq_len,
-                                                     beam_size,
-                                                     maxlens,
-                                                     self.params["vocab"]["EOS_ID"],
-                                                     self.params["vocab"]["PAD_ID"],
-                                                     self.params["test"]["length_penalty_a"],
-                                                     params=decode_config)
+        hypos, scores = beam_search_decode(
+            self.__get_logits_fn,
+            cache,
+            init_seq,
+            init_seq_len,
+            beam_size,
+            maxlens,
+            self.params["vocab"]["EOS_ID"],
+            self.params["vocab"]["PAD_ID"],
+            params=decode_config or self.params['test']['decode_config'])
 
         if return_search_results:
             return hypos, scores

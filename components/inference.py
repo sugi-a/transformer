@@ -29,7 +29,8 @@ class Inference:
         # Merging the default decoding setting and the one specified at runtime.
         if not 'decode_config' in params['test']:
             params['test']['decode_config'] = {}
-        merge_nested_dict(params['test'], decode_config)
+        merge_nested_dict(params['test']['decode_config'], decode_config)
+        logger.debug('Decode configuration: ' + str(params['test']['decode_config']))
 
         # Vocabulary utility
         self.vocab = dataprocessing.Vocabulary(
@@ -94,8 +95,7 @@ class Inference:
             self.ph_beam_size = tf.placeholder(tf.int32, [])
             self.op_beam_hypos_scores = self.make_op(
                 self.fn_beam_search,
-                self.ph_beam_size,
-                decode_config=decode_config)
+                self.ph_beam_size)
 
             # Computation graph for perplexity
             self.op_perplexity = self.make_op(self.fn_perplexity)
@@ -104,7 +104,7 @@ class Inference:
             self.ph_length_penalty = tf.placeholder(tf.float64, [])
             self.op_trans_score = self.make_op(self.fn_translation_score)
 
-    def fn_beam_search(self, inputs, ph_beam_size, decode_config):
+    def fn_beam_search(self, inputs, ph_beam_size):
         (x, x_len), (init_y, init_y_len) = inputs
         beam_candidates, scores = self.model.decode(
             x,
@@ -112,8 +112,7 @@ class Inference:
             ph_beam_size,
             return_search_results=True,
             init_y=init_y,
-            init_y_len=init_y_len,
-            decode_config=decode_config)
+            init_y_len=init_y_len)
         return beam_candidates, scores
 
     def fn_perplexity(self, inputs):
@@ -243,7 +242,7 @@ class Inference:
 
     def calculate_translation_score(self, sources, targets, length_penalty_a=None):
         if length_penalty_a is None:
-            length_penalty_a = self.params["test"]["length_penalty_a"]
+            length_penalty_a = self.params["test"]["decode_config"]["length_penalty_a"]
         batches = self.make_batches(sources, targets)
         scores, = self.execute_op(self.op_trans_score, batches, {self.ph_length_penalty: length_penalty_a})
         return scores
@@ -279,9 +278,6 @@ class Inference:
             return candidates
 
 def main():
-    # logger
-    basicConfig(level=INFO)
-
     # mode keys
     TRANSLATE = 'translate'
     PERPLEXITY = 'perplexity'
@@ -303,7 +299,11 @@ def main():
     parser.add_argument('--context_delimiter', type=str, default=None)
     parser.add_argument('--beam_size', type=int, default=1)
     parser.add_argument('--online', action='store_true')
+    parser.add_argument('--log-level', choices=["INFO", "DEBUG"], default="INFO")
     args = parser.parse_args()
+
+    # logger
+    basicConfig(level=(INFO if args.log_level == 'INFO' else 'DEBUG'))
 
     dec_conf = json.loads(args.decode_config_json) if args.decode_config_json else None
 

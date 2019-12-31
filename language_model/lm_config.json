@@ -29,7 +29,6 @@
         }
     },
     "test": {
-        "length_penalty_a": 0
     },
     "network": {
         "max_length": 512,
