@@ -305,6 +305,11 @@ class Decoder(tf.layers.Layer):
                 'pos_emb',
                 [self.params['network']['max_length'], self.params['network']['embed_size']],
                 tf.float32)
+
+        if self.params['network']['pos_encoding']:
+            self.pos_enc_table = positional_encoding(
+                self.params['network']['max_length'],
+                self.params["network"]["embed_size"])
         
         self.blocks = []
         for i in range(self.params["network"]["n_blocks"]):
@@ -372,9 +377,8 @@ class Decoder(tf.layers.Layer):
         _pos_info_count = 0
         if self.params['network']['pos_encoding']:
             # Positional encoding. Take t >= current-front-position
-            outputs = outputs + positional_encoding(
-                seq_end, self.params["network"]["embed_size"])[seq_start:]
             _pos_info_count += 1
+            outputs += self.pos_enc_table[seq_start:seq_end]
         if self.params['network']['pos_embedding']:
             _pos_info_count += 1
             outputs += self.pos_emb[seq_start:seq_end]
