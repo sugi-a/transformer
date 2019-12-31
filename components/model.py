@@ -77,10 +77,7 @@ def positional_encoding(length, emb_size, name='positional_encoding'):
         pos = tf.range(tf.cast(length, tf.float32))
         half = emb_size // 2
         i = tf.range(half, dtype=tf.float32)
-        scaled_time = (
-            tf.expand_dims(pos, axis=1) /
-            tf.expand_dims(tf.pow(10000.0, i / half), axis=0)
-            )
+        scaled_time = pos[:, None] / tf.pow(10000.0, i / half)[None]
         return tf.concat([tf.sin(scaled_time), tf.cos(scaled_time)], axis=1)
 
 def make_self_attn_bias(lengths, maxlen):
@@ -384,6 +381,9 @@ class Decoder(tf.layers.Layer):
         if self.params["network"].get("relative_position", False):
             _pos_info_count += 1
 
+        # Trimming self-attention bias according to the cache
+        trimmed_self_attn_bias = self_attn_bias[:, :, seq_start:seq_end, :seq_end]
+
         # Alert if there are more than one position information representation used
         if _pos_info_count > 1:
             logger.warning('You are using more than one position info representations in Decoder')
@@ -399,7 +399,7 @@ class Decoder(tf.layers.Layer):
             layer_name = 'layer_{}'.format(i)
             layer_cache = cache.get(layer_name, None)
 
-            outputs = self_attn(outputs, self_attn_bias, training=training, cache=layer_cache)
+            outputs = self_attn(outputs, trimmed_self_attn_bias, training=training, cache=layer_cache)
             outputs = ctx_attn(outputs, cache["enc_outputs"], cache["ctx_attn_bias"], training=training)
             outputs = ff(outputs, training=training)
         
@@ -469,27 +469,7 @@ class Transformer(tf.layers.Layer):
 
 
     def __get_logits_fn(self, dec_inputs, cache, training=False):
-        if 'layer_0' in cache:
-            """
-            decoder self-attention is from dec_inputs (shape [batch, n, emb])
-            to concat(cache, dec_inputs). So the bias matrix used here is of
-            shape [n, length] which is a sub part of the real bias matrix for
-            the real self-attention (from concat(cache, dec_inputs) to
-            concat(cache, dec_inputs)): RMatrix[start:end, 0:end] 
-            """
-            l0v_cache = cache['layer_0']['v']
-            current_front = tf.shape(l0v_cache)[1]
-            current_tail = current_front + tf.shape(dec_inputs)[1]
-        else:
-            current_front = 0
-            current_tail = tf.shape(dec_inputs)[1]
-
-        # Cut out the self-attention bias
-        self_attn_bias = self.triangle_bias[:, :, current_front:current_tail, :current_tail]
-
-        # Decoder output
-        outputs = self.decoder(dec_inputs, self_attn_bias, cache, training=False)
-        return outputs
+        return self.decoder(dec_inputs, self.triangle_bias, cache, training=False)
 
     def get_logits(self, x, y, x_len, y_len, training=False):
         """Compute logits given inputs for encoder and decoder.
@@ -539,16 +519,17 @@ class Transformer(tf.layers.Layer):
         # Maximum target length
         maxlens = tf.minimum(self.params['network']['max_length'] - 10, x_len * 3 + 10)
 
-        hypos, scores = beam_search_decode(self.__get_logits_fn,
-                                                     cache,
-                                                     init_seq,
-                                                     init_seq_len,
-                                                     beam_size,
-                                                     maxlens,
-                                                     self.params["vocab"]["EOS_ID"],
-                                                     self.params["vocab"]["PAD_ID"],
-                                                     self.params["test"]["length_penalty_a"],
-                                                     params=decode_config)
+        hypos, scores = beam_search_decode(
+            self.__get_logits_fn,
+            cache,
+            init_seq,
+            init_seq_len,
+            beam_size,
+            maxlens,
+            self.params["vocab"]["EOS_ID"],
+            self.params["vocab"]["PAD_ID"],
+            self.params["test"]["length_penalty_a"],
+            params=decode_config)
 
         if return_search_results:
             return hypos, scores
