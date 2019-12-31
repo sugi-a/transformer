@@ -28,9 +28,9 @@
         }
     },
     "test": {
-        "length_penalty_a": 1.0,
         "decode_config":{
-            "sampling_method": 0
+            "sampling_method": 0,
+            "length_penalty_a": 1.0
         }
     },
     "network": {

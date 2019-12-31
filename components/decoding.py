@@ -13,7 +13,7 @@ BeamSearchKeys = {
     "KEY_DIVERSE_BEAM_SEARCH" : 2
 }
 
-def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_size, maxlens, eos_id, pad_id=0, alpha=1, params=None):
+def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_size, maxlens, eos_id, pad_id=0, params=None):
     """
     Args:
         get_logits_fn: produces logits given decoder inputs and cached inputs
@@ -91,7 +91,9 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
         return tf.tile(batch, tile)
 
     def get_score(log_prob, length):
-        return log_prob / length_penalty(length, alpha)
+        length_penalty_a = params.get('length_penalty_a', 1.0)
+        logger.debug('length_penalty_a: {}'.format(length_penalty_a))
+        return log_prob / length_penalty(length, length_penalty_a)
 
     def cond_fn(loop_vars):
         not_closed = tf.logical_not(tf.reduce_all(loop_vars['has_eos']), name='loop_condition')

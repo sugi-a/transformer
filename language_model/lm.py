@@ -168,7 +168,7 @@ class DecoderLanguageModel(tf.layers.Layer):
 
         # Add SOS to the head. 
         # Note: No need to remove the last token since it's not EOS
-        x = tf.concat([tf.fill([tf.shape(x)[0], 1], self.params['vocab']['SOS_ID']), x, axis=1)
+        x = tf.concat([tf.fill([tf.shape(x)[0], 1], self.params['vocab']['SOS_ID']), x], axis=1)
         x_len += 1
         
         hypos, scores = model.beam_search_decode(
@@ -179,8 +179,6 @@ class DecoderLanguageModel(tf.layers.Layer):
             beam_size,
             maxlen,
             self.params['vocab']['EOS_ID'],
-            self.params['vocab']['PAD_ID'],
-            self.params['test']['length_penalty_a'],
-            sampling_method=sampling_method)
+            self.params['vocab']['PAD_ID'])
 
         return hypos

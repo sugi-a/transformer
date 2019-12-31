@@ -528,8 +528,7 @@ class Transformer(tf.layers.Layer):
             maxlens,
             self.params["vocab"]["EOS_ID"],
             self.params["vocab"]["PAD_ID"],
-            self.params["test"]["length_penalty_a"],
-            params=decode_config)
+            params=decode_config or self.params['test']['decode_config'])
 
         if return_search_results:
             return hypos, scores
