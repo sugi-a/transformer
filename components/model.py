@@ -6,6 +6,8 @@ import numpy as np
 from .relative_position import RelativePositionMultiheadSelfAttention
 from .decoding import beam_search_decode
 
+NEG_INF = -1e9
+
 class Layer_norm(tf.layers.Layer):
     def __init__(self, eps=1e-8, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -88,7 +90,6 @@ def make_self_attn_bias(lengths, maxlen):
     returns:
         Tensor of shape [batch_size, 1, 1, length] with type tf.float32
     """
-    NEG_INF = -1e9
     outputs = (1 - tf.sequence_mask(lengths, maxlen, tf.float32)) * NEG_INF
     return tf.expand_dims(tf.expand_dims(outputs, axis=1), axis=1)
 
@@ -99,7 +100,6 @@ def make_attention_bias_triangle(length):
     Returns:
         Tensor of shape [1, 1, length, length]
         """
-    NEG_INF = -1e9
     valid_locs = tf.matrix_band_part(tf.ones([1,1,length,length]), -1, 0)
     return (1 - valid_locs) * NEG_INF
 
@@ -360,7 +360,7 @@ class Decoder(tf.layers.Layer):
 
         super().build(input_shape)
 
-    def call(self, inputs, self_attn_bias, cache, training=False):
+    def call(self, inputs, self_attn_bias, cache, training=False, offsets=None):
         """`cache` must contain enc_outputs and ctx_attn_bias"""
         if 'layer_0' in cache:
             cache_l0_v = cache['layer_0']['v']
@@ -370,29 +370,51 @@ class Decoder(tf.layers.Layer):
             seq_start = 0
             seq_end = tf.shape(inputs)[1]
 
+        # ---- Things to give postion information and inter-position interaction ----
+        if offsets:
+            self_attn_bias = self_attn_bias[:, :, seq_start:seq_end, :seq_end] \
+                + NEG_INF * tf.sequence_mask(offsets, seq_end, dtype=tf.float32)[:, None, None]
+
+            indices = tf.range(seq_end - seq_start)[None] + (seq_start - offsets)[:, None]
+            if self.params['network']['pos_encoding']:
+                pos_enc = tf.gather(self.pos_enc_table, indices)
+            else:
+                pos_enc = None
+            
+            if self.params['network']['pos_embedding']:
+                pos_emb = tf.gather(self.pos_emb, indices)
+            else:
+                pos_emb = None
+        else:
+            self_attn_bias = self_attn_bias[:, :, seq_start:seq_end, :seq_end]
+
+            if self.params['network']['pos_encoding']:
+                pos_enc = self.pos_enc_table[seq_start: seq_end]
+            else:
+                pos_enc = None
+            
+            if self.params['network']['pos_embedding']:
+                pos_emb = self.pos_emb[seq_start: seq_end]
+            else:
+                pos_emb = None
+
+        # Alert if there are more than one position information representation used
+        pos_info_count = [
+            self.params['network']['pos_encoding'],
+            self.params['network']['pos_embedding'],
+            self.params['network']['relative_position']].count(True)
+        if pos_info_count > 1:
+            logger.warning('You are using more than one position info representations in Decoder')
+        elif pos_info_count == 0:
+            logger.warning('No position information representation is used in Decoder')
+
+
+        # ---- Start of dataflow ----
         # Decoder embedding
         outputs = self.embedding_layer(inputs)
 
-        # Position information
-        _pos_info_count = 0
-        if self.params['network']['pos_encoding']:
-            # Positional encoding. Take t >= current-front-position
-            _pos_info_count += 1
-            outputs += self.pos_enc_table[seq_start:seq_end]
-        if self.params['network']['pos_embedding']:
-            _pos_info_count += 1
-            outputs += self.pos_emb[seq_start:seq_end]
-        if self.params["network"].get("relative_position", False):
-            _pos_info_count += 1
-
-        # Trimming self-attention bias according to the cache
-        trimmed_self_attn_bias = self_attn_bias[:, :, seq_start:seq_end, :seq_end]
-
-        # Alert if there are more than one position information representation used
-        if _pos_info_count > 1:
-            logger.warning('You are using more than one position info representations in Decoder')
-        elif _pos_info_count == 0:
-            logger.warning('No position information representation is used in Decoder')
+        if pos_enc: outputs += pos_enc
+        if pos_emb: outputs += pos_emb
 
         # Dropout
         outputs = tf.layers.dropout(
@@ -403,7 +425,7 @@ class Decoder(tf.layers.Layer):
             layer_name = 'layer_{}'.format(i)
             layer_cache = cache.get(layer_name, None)
 
-            outputs = self_attn(outputs, trimmed_self_attn_bias, training=training, cache=layer_cache)
+            outputs = self_attn(outputs, self_attn_bias, training=training, cache=layer_cache)
             outputs = ctx_attn(outputs, cache["enc_outputs"], cache["ctx_attn_bias"], training=training)
             outputs = ff(outputs, training=training)
         
@@ -448,12 +470,15 @@ class Transformer(tf.layers.Layer):
         super().build(input_shape)
 
     
-    def make_cache(self, x, x_len, training, layer_cache=False):
+    def make_cache(self, x, x_len, training, layer_cache=False, offsets=None):
         with tf.name_scope('enc_self_attn_bias'):
             enc_self_attn_bias = make_self_attn_bias(x_len, tf.shape(x)[1])
         enc_outputs = self.encoder(x, enc_self_attn_bias, training=training)
 
-        return self.decoder.make_cache(enc_outputs, enc_self_attn_bias, layer_cache=layer_cache)
+        cache = self.decoder.make_cache(enc_outputs, enc_self_attn_bias, layer_cache=layer_cache)
+        if offsets: cache['offsets'] = offsets
+
+        return cache
 
 
     def call(self, x, x_len, y, y_len, training=False):
@@ -472,10 +497,10 @@ class Transformer(tf.layers.Layer):
         self(x, x_len, y, y_len)
 
 
-    def __get_logits_fn(self, dec_inputs, cache, training=False):
-        return self.decoder(dec_inputs, self.triangle_bias, cache, training=False)
+    def get_logits_w_cache(self, dec_inputs, cache, training=False):
+        return self.decoder(dec_inputs, self.triangle_bias, cache, training=False, offsets=cache.get('offsets', None))
 
-    def get_logits(self, x, y, x_len, y_len, training=False):
+    def get_logits(self, x, y, x_len, y_len, training=False, cache_here=None, right_align=False):
         """Compute logits given inputs for encoder and decoder.
         Args:
             x: inputs for encoder with shape [batch_size, length_enc]
@@ -487,13 +512,26 @@ class Transformer(tf.layers.Layer):
         Returns:
             """
         assert self.built
-        # add SOS to the beginning and remove the last token EOS
+
+        # add SOS to the beginning and remove the last token
         dec_inputs = tf.concat(
             [tf.fill([tf.shape(y)[0], 1], self.params["vocab"]["SOS_ID"]), y[:, :-1]], axis=1)
 
-        cache = self.make_cache(x, x_len, training, False)
+        if right_align:
+            maxlen = tf.shape(y)[1]
+            offsets = maxlen - y_len
+            indices = tf.range(maxlen)[None] - offsets[:, None]
+            dec_inputs = tf.batch_gather(dec_inputs, indices)
+        else:
+            offsets = None
 
-        return self.__get_logits_fn(dec_inputs, cache, training=training)
+        cache = self.make_cache(x, x_len, training, layer_cache=False, offsets=offsets)
+
+        if cache_here is not None:
+            cache_here.update(cache)
+
+        return self.get_logits_w_cache(dec_inputs, cache, training=training)
+
 
     def decode(self, x, x_len, beam_size=8, return_search_results=False, init_y=None, init_y_len=None, decode_config=None):
         """Given inputs x, this method produces translation candidates by beam search
@@ -524,7 +562,7 @@ class Transformer(tf.layers.Layer):
         maxlens = tf.minimum(self.params['network']['max_length'] - 10, x_len * 3 + 10)
 
         hypos, scores = beam_search_decode(
-            self.__get_logits_fn,
+            self.get_logits_w_cache,
             cache,
             init_seq,
             init_seq_len,
