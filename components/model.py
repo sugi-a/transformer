@@ -643,6 +643,7 @@ class Transformer(tf.layers.Layer):
         if init_y is None:
             init_y = tf.fill([tf.shape(x)[0], 1], self.params["vocab"]["SOS_ID"])
             cache = self.make_cache(x, x_len, training=False, layer_cache=True)
+            offsets = None
         else:
             # Shift 1 to the right. Shape remains to be [batch, length]
             init_y = tf.concat(
@@ -663,6 +664,7 @@ class Transformer(tf.layers.Layer):
             maxlens,
             self.params["vocab"]["EOS_ID"],
             self.params["vocab"]["PAD_ID"],
+            offsets=offsets,
             params=decode_config or self.params['test']['decode_config'])
 
         # Remove offsets and remove SOS

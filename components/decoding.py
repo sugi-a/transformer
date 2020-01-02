@@ -342,7 +342,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
     return seq, score
 
 
-def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlens, eos_id, pad_id=0, params=None):
+def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlens, eos_id, pad_id=0, offsets=None, params=None):
     """<sos> in `init_seq` is not removed."""
     NEG_INF = -1e9
 
@@ -398,8 +398,11 @@ def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlen
     def body_fn(loop_vars):
 
         with tf.name_scope('loop_body'):
-            # The position of the token predicted in this iteration. Starts from 0
-            cur_pos = tf.shape(loop_vars['generated_seq'])[2] + tf.shape(init_seq)[2]
+            # The position of the token predicted in this iteration. Starts from 0 [batch] or [1]
+            if offsets:
+                cur_pos = tf.shape(loop_vars['generated_seq'])[2] + tf.shape(init_seq)[2] - 1 - offsets
+            else:
+                cur_pos = (tf.shape(loop_vars['generated_seq'])[2] + tf.shape(init_seq)[2] - 1)[None]
 
             # flatten cache and dec_inputs
             with tf.name_scope('flatten_inputs'):
@@ -468,7 +471,7 @@ def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlen
 
                     # Update sequence score [bat, old_beam * new_beam]
                     forked_score = tf.where(forked_ended, forked_score + eos_mask,
-                        get_score(forked_seqp, cur_pos + 1))
+                        get_score(forked_seqp, cur_pos[:, None] + 1))
 
             with tf.name_scope('get_top_k'):
                 # Top k=beam [bat, beam]
