@@ -328,10 +328,11 @@ class Encoder(tf.layers.Layer):
         return self.output_norm(outputs)
 
 class Decoder(tf.layers.Layer):
-    def __init__(self, params, embedding_layer=None, *args, **kwargs):
+    def __init__(self, params, embedding_layer=None, context=True, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.params = params
         self.embedding_layer = embedding_layer
+        self.context = context
 
     def build(self, input_shape):
         if self.embedding_layer is None:
@@ -377,13 +378,16 @@ class Decoder(tf.layers.Layer):
                     self.params)
 
             # Dec-Enc attention layer
-            ctx_attn = BlockWrapper(
-                MultiheadAttention(
-                    self.params["network"]["attention_size"],
-                    self.params["network"]["n_heads"],
-                    self.params["network"]["dropout_rate"],
-                    name='{}_{}'.format(layer_name, 'context_attention')),
-                self.params)    
+            if self.context:
+                ctx_attn = BlockWrapper(
+                    MultiheadAttention(
+                        self.params["network"]["attention_size"],
+                        self.params["network"]["n_heads"],
+                        self.params["network"]["dropout_rate"],
+                        name='{}_{}'.format(layer_name, 'context_attention')),
+                    self.params)    
+            else:
+                ctx_attn = None
 
             # Feedforward layer
             ff = BlockWrapper(
@@ -467,7 +471,8 @@ class Decoder(tf.layers.Layer):
             layer_cache = cache.get(layer_name, None)
 
             outputs = self_attn(outputs, self_attn_bias, training=training, cache=layer_cache)
-            outputs = ctx_attn(outputs, cache["enc_outputs"], cache["ctx_attn_bias"], training=training)
+            if self.context:
+                outputs = ctx_attn(outputs, cache["enc_outputs"], cache["ctx_attn_bias"], training=training)
             outputs = ff(outputs, training=training)
         
         outputs = self.output_norm(outputs)
@@ -475,11 +480,16 @@ class Decoder(tf.layers.Layer):
         return outputs
 
 
-    def make_cache(self, enc_outputs, ctx_attn_bias, layer_cache=False):
-        cache = {
-            'enc_outputs': enc_outputs,
-            'ctx_attn_bias': ctx_attn_bias
-        }
+    def make_cache(self, enc_outputs=None, ctx_attn_bias=None, layer_cache=False):
+        assert (enc_outputs is None) == (ctx_attn_bias is None) == (not self.context)
+
+        if self.context:
+            cache = {
+                'enc_outputs': enc_outputs,
+                'ctx_attn_bias': ctx_attn_bias
+            }
+        else:
+            cache = {}
 
         if layer_cache:
             batch_size = tf.shape(enc_outputs)[0]
