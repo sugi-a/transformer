@@ -4,9 +4,50 @@ from tensorflow.contrib.framework import nest
 import numpy as np
 
 from .relative_position import RelativePositionMultiheadSelfAttention
-from .decoding import beam_search_decode
+from .decoding import beam_search_decode beam_search_decode_V2
 
 NEG_INF = -1e9
+
+def align_to_right(y, y_len, pad=None):
+    """ Example.
+    Inputs (batch size = 2):
+        [[This is my  cat <eos> <pad> <pad>],
+         [That is why she hates you   <eos>]]
+    Outputs (right-aligned sequences)
+        [[<pad> <pad> This is  my    cat <eos>],
+         [That  is    why  she hates you <eos>]]
+    Returns:
+        (aligned sequences), (offsets)
+    """
+    maxlen = tf.shape(y)[1]
+    offsets = maxlen - y_len
+    indices = tf.range(maxlen)[None] - offsets[:, None]
+    indices = tf.math.maximum(0, indices)
+    y_aligned = tf.batch_gather(y, indices)
+    if pad is not None:
+        y_aligned = tf.where(
+            tf.sequence_mask(offsets, maxlen=maxlen),
+            tf.broadcast_to(pad, tf.shape(y_aligned)),
+            y_aligned)
+    
+    return y_aligned, offsets
+
+
+def remove_offsets(y, offsets, pad=None):
+    """Returns:
+        aligned sequences"""
+    maxlen = tf.shape(y)[1]
+    indices = tf.range(maxlen)[None] + offsets[:, None]
+    indices = tf.math.minimum(indices, maxlen - 1)
+    y_aligned = tf.batch_gather(y, indices)
+    if pad is not None:
+        lengths = maxlen - offsets
+        y_aligned = tf.where(
+            tf.sequence_mask(lengths, maxlen=maxlen),
+            y_aligned,
+            tf.broadcast_to(pad, tf.shape(y_aligned)))
+    return y_aligned
+
 
 class Layer_norm(tf.layers.Layer):
     def __init__(self, eps=1e-8, *args, **kwargs):
@@ -500,7 +541,10 @@ class Transformer(tf.layers.Layer):
     def get_logits_w_cache(self, dec_inputs, cache, training=False):
         return self.decoder(dec_inputs, self.triangle_bias, cache, training=False, offsets=cache.get('offsets', None))
 
-    def get_logits(self, x, y, x_len, y_len, training=False, cache_here=None, right_align=False):
+
+
+
+    def get_logits(self, x, y, x_len, y_len, training=False, shift_dec_inputs=True, offsets=None):
         """Compute logits given inputs for encoder and decoder.
         Args:
             x: inputs for encoder with shape [batch_size, length_enc]
@@ -509,26 +553,21 @@ class Transformer(tf.layers.Layer):
                 and the last token is removed. So, `y` should not contain SOS
             x_len: lengths of x with shape [batch_size]
             y_len: lengths of y
+            shift_dec_inputs: If true, <SOS> is added to the beginning of each sequence. This argument must be False if `offsets` is not None
+            offsets: [batch_size] indicating the offsets of the sequences.
+
         Returns:
             """
         assert self.built
+        assert not (offsets and shift_dec_inputs)
 
         # add SOS to the beginning and remove the last token
-        dec_inputs = tf.concat(
-            [tf.fill([tf.shape(y)[0], 1], self.params["vocab"]["SOS_ID"]), y[:, :-1]], axis=1)
-
-        if right_align:
-            maxlen = tf.shape(y)[1]
-            offsets = maxlen - y_len
-            indices = tf.range(maxlen)[None] - offsets[:, None]
-            dec_inputs = tf.batch_gather(dec_inputs, indices)
-        else:
-            offsets = None
+        if shift_dec_inputs:
+            dec_inputs = tf.concat(
+                [tf.fill([tf.shape(y)[0], 1], self.params["vocab"]["SOS_ID"]), y[:, :-1]],
+                axis=1)
 
         cache = self.make_cache(x, x_len, training, layer_cache=False, offsets=offsets)
-
-        if cache_here is not None:
-            cache_here.update(cache)
 
         return self.get_logits_w_cache(dec_inputs, cache, training=training)
 
@@ -579,4 +618,49 @@ class Transformer(tf.layers.Layer):
             top_seqs = tf.batch_gather(hypos, top_indices)
             return top_seqs
 
+
+    def decode_V2(self, x, x_len, beam_size=8, return_search_results=False, init_y=None, init_y_len=None, decode_config=None):
+        """`init_y` MUST have <eos> tokens at the tail,
+            which are removed at the start of decoding."""
+        assert self.built
+
+        if init_y is None:
+            init_y = tf.fill([tf.shape(x)[0], 1], self.params["vocab"]["SOS_ID"])
+            cache = self.make_cache(x, x_len, training=False, layer_cache=True)
+        else:
+            # Shift 1 to the right. Shape remains to be [batch, length]
+            init_y = tf.concat(
+                [tf.fill([tf.shape(x)[0], 1], self.params["vocab"]["SOS_ID"]), init_y[:, :-1]], axis=1)
+
+            # Align to the right [batch, len]
+            init_y, offsets = align_to_right(init_y, init_y_len)
+            cache = self.make_cache(x, x_len, training=False, layer_cache=True, offsets=offsets)
+
+        # Maximum target length
+        maxlens = tf.minimum(self.params['network']['max_length'] - 10, x_len * 3 + 10)
+
+        hypos, scores = beam_search_decode_V2(
+            self.get_logits_w_cache,
+            cache,
+            init_y,
+            beam_size,
+            maxlens,
+            self.params["vocab"]["EOS_ID"],
+            self.params["vocab"]["PAD_ID"],
+            params=decode_config or self.params['test']['decode_config'])
+
+        # Remove offsets and remove SOS
+        hypos = tf.reshape(
+            remove_offsets(
+                tf.reshape(hypos, [tf.shape(hypos)[0], -1]),
+                offsets,
+                self.params['vocab']['PAD_ID']),
+            tf.shape(hypos))[:, :, 1:]
+
+        if return_search_results:
+            return hypos, scores
+        else:
+            top_indices = tf.math.argmax(scores, axis=1)
+            top_seqs = tf.batch_gather(hypos, top_indices)
+            return top_seqs
 
