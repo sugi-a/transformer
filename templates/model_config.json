@@ -39,6 +39,7 @@
         "n_heads": 8,
         "attention_size": 512,
         "embed_size": 512,
+        "ff_size": 2048,
         "dropout_rate": 0.1,
         "share_embedding": true,
         "pos_encoding": true,

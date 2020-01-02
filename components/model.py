@@ -4,7 +4,7 @@ from tensorflow.contrib.framework import nest
 import numpy as np
 
 from .relative_position import RelativePositionMultiheadSelfAttention
-from .decoding import beam_search_decode beam_search_decode_V2
+from .decoding import beam_search_decode, beam_search_decode_V2
 
 NEG_INF = -1e9
 
@@ -284,7 +284,7 @@ class Encoder(tf.layers.Layer):
             # Feedforward layer
             ff = BlockWrapper(
                 Feedforward(
-                    4 * self.params["network"]["embed_size"],
+                    self.params["network"]["ff_size"],
                     self.params["network"]["dropout_rate"],
                     name='{}_{}'.format(layer_name, 'feedforward')),
                 self.params)
@@ -392,7 +392,7 @@ class Decoder(tf.layers.Layer):
             # Feedforward layer
             ff = BlockWrapper(
                 Feedforward(
-                    4 * self.params["network"]["embed_size"],
+                    self.params["network"]["ff_size"],
                     self.params["network"]["dropout_rate"],
                     name='{}_{}'.format(layer_name, 'feedforward')),
                 self.params)
@@ -412,7 +412,7 @@ class Decoder(tf.layers.Layer):
 
 
     def call(self, inputs, self_attn_bias, context=None, ctx_attn_bias=None, cache=None, training=False, offsets=None):
-        assert (context is None) == (ctx_attn_bias is None) == not self.context
+        assert (context is None) == (ctx_attn_bias is None) == (not self.context)
         if cache is None: cache = {}
 
         if 'layer_0' in cache:
@@ -424,7 +424,7 @@ class Decoder(tf.layers.Layer):
             seq_end = tf.shape(inputs)[1]
 
         # ---- Things to give postion information and inter-position interaction ----
-        if offsets:
+        if offsets is not None:
             self_attn_bias = self_attn_bias[:, :, seq_start:seq_end, :seq_end] \
                 + NEG_INF * tf.sequence_mask(offsets, seq_end, dtype=tf.float32)[:, None, None]
 
@@ -466,8 +466,8 @@ class Decoder(tf.layers.Layer):
         # Decoder embedding
         outputs = self.embedding_layer(inputs)
 
-        if pos_enc: outputs += pos_enc
-        if pos_emb: outputs += pos_emb
+        if pos_enc is not None: outputs += pos_enc
+        if pos_emb is not None: outputs += pos_emb
 
         # Dropout
         outputs = tf.layers.dropout(
@@ -489,6 +489,7 @@ class Decoder(tf.layers.Layer):
 
 
     def make_cache(self, batch_size):
+        cache = {}
         for layer in range(self.params["network"]["n_blocks"]):
             layer_name = 'layer_{}'.format(layer)
             with tf.name_scope('cache_{}'.format(layer_name)):
@@ -528,7 +529,7 @@ class Transformer(tf.layers.Layer):
         cache['enc_outputs'] = enc_outputs
         cache['ctx_attn_bias'] = enc_self_attn_bias
 
-        if offsets: cache['offsets'] = offsets
+        if offsets is not None: cache['offsets'] = offsets
 
         return cache
 

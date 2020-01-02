@@ -392,14 +392,14 @@ def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlen
 
     def cond_fn(loop_vars):
         not_closed = tf.logical_not(tf.reduce_all(loop_vars['has_eos']), name='loop_condition')
-        not_long = tf.less(tf.shape(loop_vars['generated_seq'])[2] + com_prefix_len - 1, maxlen)
+        not_long = tf.less(tf.shape(loop_vars['generated_seq'])[2] + tf.shape(init_seq)[2] - 1, maxlen)
         return tf.logical_and(not_closed, not_long)
 
     def body_fn(loop_vars):
 
         with tf.name_scope('loop_body'):
             # The position of the token predicted in this iteration. Starts from 0 [batch] or [1]
-            if offsets:
+            if offsets is not None:
                 cur_pos = tf.shape(loop_vars['generated_seq'])[2] + tf.shape(init_seq)[2] - 1 - offsets
             else:
                 cur_pos = (tf.shape(loop_vars['generated_seq'])[2] + tf.shape(init_seq)[2] - 1)[None]
@@ -517,8 +517,7 @@ def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlen
                 pred = tf.batch_gather(ids, top_ind) # [batch, beam]
 
                 # New token to be added
-                new_tok = tf.where(old_ended, pad_tok,
-                        tf.where(stopping, eos_tok, pred)))
+                new_tok = tf.where(old_ended, pad_tok, tf.where(stopping, eos_tok, pred))
 
                 # Append new token. [batch, beam, len]->[batch, beam, len+1]
                 new_vars['generated_seq'] = tf.concat([gen_seq, new_tok[:,:, None]], axis=-1)
