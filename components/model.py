@@ -405,8 +405,10 @@ class Decoder(tf.layers.Layer):
 
         super().build(input_shape)
 
-    def call(self, inputs, self_attn_bias, cache, training=False, offsets=None):
-        """`cache` must contain enc_outputs and ctx_attn_bias"""
+    def call(self, inputs, self_attn_bias, context=None, ctx_attn_bias=None, cache=None, training=False, offsets=None):
+        assert (context is None) == (ctx_attn_bias is None) == not self.context
+        if cache is None: cache = {}
+
         if 'layer_0' in cache:
             cache_l0_v = cache['layer_0']['v']
             seq_start = tf.shape(cache_l0_v)[1]
@@ -472,7 +474,7 @@ class Decoder(tf.layers.Layer):
 
             outputs = self_attn(outputs, self_attn_bias, training=training, cache=layer_cache)
             if self.context:
-                outputs = ctx_attn(outputs, cache["enc_outputs"], cache["ctx_attn_bias"], training=training)
+                outputs = ctx_attn(outputs, context, ctx_attn_bias, training=training)
             outputs = ff(outputs, training=training)
         
         outputs = self.output_norm(outputs)
@@ -480,25 +482,13 @@ class Decoder(tf.layers.Layer):
         return outputs
 
 
-    def make_cache(self, enc_outputs=None, ctx_attn_bias=None, layer_cache=False):
-        assert (enc_outputs is None) == (ctx_attn_bias is None) == (not self.context)
-
-        if self.context:
-            cache = {
-                'enc_outputs': enc_outputs,
-                'ctx_attn_bias': ctx_attn_bias
-            }
-        else:
-            cache = {}
-
-        if layer_cache:
-            batch_size = tf.shape(enc_outputs)[0]
-            for layer in range(self.params["network"]["n_blocks"]):
-                layer_name = 'layer_{}'.format(layer)
-                with tf.name_scope('cache_{}'.format(layer_name)):
-                    cache[layer_name] = {
-                        'k': tf.zeros([batch_size, 0, self.params["network"]["attention_size"]]),
-                        'v': tf.zeros([batch_size, 0, self.params["network"]["attention_size"]])}
+    def make_cache(self, batch_size):
+        for layer in range(self.params["network"]["n_blocks"]):
+            layer_name = 'layer_{}'.format(layer)
+            with tf.name_scope('cache_{}'.format(layer_name)):
+                cache[layer_name] = {
+                    'k': tf.zeros([batch_size, 0, self.params["network"]["attention_size"]]),
+                    'v': tf.zeros([batch_size, 0, self.params["network"]["attention_size"]])}
         return cache
 
 
@@ -521,12 +511,17 @@ class Transformer(tf.layers.Layer):
         super().build(input_shape)
 
     
-    def make_cache(self, x, x_len, training, layer_cache=False, offsets=None):
-        with tf.name_scope('enc_self_attn_bias'):
-            enc_self_attn_bias = make_self_attn_bias(x_len, tf.shape(x)[1])
-        enc_outputs = self.encoder(x, enc_self_attn_bias, training=training)
+    def make_cache(self, x, x_len, training=False, layer_cache=False, offsets=None):
+        """layer_cache means decoder cache"""
+        cache = self.decoder.make_cache(tf.shape(x)[0]) if layer_cache else {}
 
-        cache = self.decoder.make_cache(enc_outputs, enc_self_attn_bias, layer_cache=layer_cache)
+        with tf.name_scope('encoder_outputs'):
+            enc_self_attn_bias = make_self_attn_bias(x_len, tf.shape(x)[1])
+            enc_outputs = self.encoder(x, enc_self_attn_bias, training=training)
+
+        cache['enc_outputs'] = enc_outputs
+        cache['ctx_attn_bias'] = enc_self_attn_bias
+
         if offsets: cache['offsets'] = offsets
 
         return cache
@@ -549,9 +544,14 @@ class Transformer(tf.layers.Layer):
 
 
     def get_logits_w_cache(self, dec_inputs, cache, training=False):
-        return self.decoder(dec_inputs, self.triangle_bias, cache, training=False, offsets=cache.get('offsets', None))
-
-
+        return self.decoder(
+            dec_inputs,
+            self.triangle_bias,
+            context=cache['enc_outputs'],
+            ctx_attn_bias=cache['ctx_attn_bias'],
+            cache=cache,
+            training=training,
+            offsets=cache.get('offsets', None))
 
 
     def get_logits(self, x, y, x_len, y_len, training=False, shift_dec_inputs=True, offsets=None):
