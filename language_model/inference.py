@@ -4,7 +4,7 @@ import numpy as np
 from logging import getLogger, INFO, DEBUG, basicConfig
 logger = getLogger(__name__)
 
-from .lm import DecoderLanguageModel
+from .lm import DecoderLanguageModel, DecoderLanguageModel_V2
 from ..components.utils import *
 from ..components import dataprocessing
 from .datasetloader import make_const_capacity_batch_list
@@ -57,7 +57,7 @@ class Inference:
             self.graph = graph or tf.get_default_graph()
 
             with self.graph.as_default():
-                self.model = DecoderLanguageModel(params)
+                self.model = DecoderLanguageModel_V2(params)
                 if self.n_gpus == 1:
                     # Single GPU
                     with tf.device('/gpu:0'):

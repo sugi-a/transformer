@@ -36,7 +36,7 @@
         "n_heads": 8,
         "attention_size": 512,
         "embed_size": 512,
-        "ff_dim": 2048,
+        "ff_size": 2048,
         "dropout_rate": 0.1,
         "pos_encoding": false,
         "pos_embedding": false,

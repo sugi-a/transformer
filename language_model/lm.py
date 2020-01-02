@@ -211,11 +211,12 @@ class DecoderLanguageModel_V2(tf.layers.Layer):
 
 
     def get_logits_w_cache(self, inputs, cache, training=False):
-        return self.decoder(dec_inputs,
+        return self.decoder(
+            inputs,
             self.triangle_bias,
             cache=cache,
             training=training,
-            offsets=cache['offsets'])
+            offsets=cache.get('offsets', None))
 
 
     def get_logits(self, x, training=False, shift_dec_inputs=True, offsets=None):

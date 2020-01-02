@@ -106,7 +106,7 @@ class Inference:
 
     def fn_beam_search(self, inputs, ph_beam_size):
         (x, x_len), (init_y, init_y_len) = inputs
-        beam_candidates, scores = self.model.decode(
+        beam_candidates, scores = self.model.decode_V2(
             x,
             x_len,
             ph_beam_size,
