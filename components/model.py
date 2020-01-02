@@ -405,6 +405,12 @@ class Decoder(tf.layers.Layer):
 
         super().build(input_shape)
 
+
+    def get_layer_cache_length(self, cache):
+        cache_l0_v = cache['layer_0']['v']
+        return tf.shape(cache_l0_v)[1]
+
+
     def call(self, inputs, self_attn_bias, context=None, ctx_attn_bias=None, cache=None, training=False, offsets=None):
         assert (context is None) == (ctx_attn_bias is None) == not self.context
         if cache is None: cache = {}
