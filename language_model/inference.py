@@ -57,7 +57,7 @@ class Inference:
             self.graph = graph or tf.get_default_graph()
 
             with self.graph.as_default():
-                self.model = DecoderLanguageModel_V2(params)
+                self.model = DecoderLanguageModel(params)
                 if self.n_gpus == 1:
                     # Single GPU
                     with tf.device('/gpu:0'):
