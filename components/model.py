@@ -668,13 +668,17 @@ class Transformer(tf.layers.Layer):
             offsets=offsets,
             params=decode_config or self.params['test']['decode_config'])
 
+        # Remove offsets
+        if offsets is not None:
+            hypos = tf.reshape(
+                remove_offsets(
+                    tf.reshape(hypos, [tf.shape(hypos)[0], -1]),
+                    offsets,
+                    self.params['vocab']['PAD_ID']),
+                tf.shape(hypos))
+
         # Remove offsets and remove SOS
-        hypos = tf.reshape(
-            remove_offsets(
-                tf.reshape(hypos, [tf.shape(hypos)[0], -1]),
-                offsets,
-                self.params['vocab']['PAD_ID']),
-            tf.shape(hypos))[:, :, 1:]
+        hypos = hypos[:,:, 1:]
 
         if return_search_results:
             return hypos, scores
