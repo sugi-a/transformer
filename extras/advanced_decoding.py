@@ -8,12 +8,13 @@ from ..components.decoding import length_penalty, beam_search_decode_V2
 from ..components.model import align_to_right remove_offsets Decoder
 
 
-def PMIFusionDecoder:
-    def __init__(self, tm, lm):
-        self.tm = tm
+def PMIFusionDecoder(Inference):
+    def __init__(self, lm_config, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.tm = self.model
+        self.tm.make_session()
+
         self.lm = lm
-
-
 
 
     def decode(self, x, x_len, ctx, ctx_len, beam_size=8):
@@ -40,6 +41,22 @@ def PMIFusionDecoder:
         # Maximum target length
         maxlens = tf.minimum(tm.params['network']['max_length'] - 10, x_len * 3 + 10)
 
+        def __get_logits_fn(dec_inputs, cache):
+            ctx_inputs = tf.cond(
+                tf.equal(0, self.tm.decoder.get_layer_cache_length(cache['TM'])),
+                lambda: cache['init_ctx'],
+                lambda: dec_inputs)
+            # Shape of dec_inputs: [batch * beam, 1]
+            # Logits [batch * beam, 1, vocab]
+            pTM = self.tm.get_logits_w_cache(dec_inputs, cache['TM'])
+            pLM = self.lm.get_logits_w_cache(dec_inputs, cache['LM'])
+            pCTXLM = self.lm.get_logits_w_cache(ctx_inputs, cache['ctxLM'])[:, -1:]
+            
+            # Fusion
+            p_fusion = pTM + pLM - pCondLM
+
+            return p_fusion
+
         # Execute
         hypos, scores = beam_search_decode_V2(
             self.__get_logits_fn,
@@ -51,19 +68,6 @@ def PMIFusionDecoder:
             self.tm.params['PAD_ID'],
             params={'length_penalty_a': 0.0})
         
-
-    def __get_logits_fn(self, dec_inputs, cache):
-        ctx_inputs = tf.cond(
-            tf.equal(0, self.tm.decoder.get_layer_cache_length(cache['TM'])),
-            lambda: cache['init_ctx'],
-            lambda: dec_inputs)
-        # Shape of dec_inputs: [batch * beam, 1]
-        # Logits [batch * beam, 1, vocab]
-        pTM = self.tm.get_logits_w_cache(dec_inputs, cache['TM'])
-        pLM = self.lm.get_logits_w_cache(dec_inputs, cache['LM'])
-        pCTXLM = self.lm.get_logits_w_cache(ctx_inputs, cache['ctxLM'])[:, -1:]
+        return hypos, scores
         
-        # Fusion
-        p_fusion = pTM + pLM - pCondLM
 
-        return p_fusion

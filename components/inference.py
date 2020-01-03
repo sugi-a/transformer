@@ -191,27 +191,21 @@ class Inference:
         return [sum((x.tolist() for x in items), []) for items in zip(*run_results)]
 
 
-    def make_session(self, sess=None, checkpoint=None, reuse_session=True):
+    def make_session(self, sess=None, load_checkpoint=None):
+        assert self.session is None
         if sess is not None:
             assert sess.graph is self.graph
             self.session = sess
+            if load_checkpoint:
+                saver = tf.train.Saver(tf.global_variables(self.model.scope_name))
+                saver.restore(self.session, self.checkpoint)
         else:
-            if reuse_session and self.session:
-                return
-
-            if (not reuse_session) and self.session: self.session.close()
-
-            checkpoint = checkpoint or self.checkpoint
-            assert checkpoint is not None
-
             with self.graph.as_default():
                 session_config = tf.ConfigProto()
                 session_config.allow_soft_placement = True
-                session = tf.Session(config=session_config, graph=self.graph)
-                self.session = session
-                saver = tf.train.Saver()
-                saver.restore(session, checkpoint)
-                self.session = session
+                self.session = tf.Session(config=session_config, graph=self.graph)
+                saver = tf.train.Saver(tf.global_variables(self.model.scope_name))
+                saver.restore(self.session, self.checkpoint)
 
     
     def make_batches(self, x, y, batch_capacity=None):
