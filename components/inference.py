@@ -171,9 +171,9 @@ class Inference:
                     self.ph_dict['init_y_len']: batch[1][1]}
 
 
-    def execute_op_iter(self, op, batches, _feed_dict=None):
+    def execute_op_iter(self, op, batches_iter, _feed_dict=None):
         assert self.session
-        for batch in batches:
+        for batch in batches_iter:
             feed_dict = self.make_feed_dict(batch)
             if _feed_dict:
                 feed_dict.update(_feed_dict)
@@ -193,8 +193,6 @@ class Inference:
         Returns:
             Value of `op` in python list format (not numpy)"""
         assert self.session
-
-        batches = list(batches)
         
         run_results = []
         start_time = time.time()
@@ -230,7 +228,11 @@ class Inference:
                 saver.restore(self.session, self.checkpoint)
 
     
-    def make_batches(self, x, y, batch_capacity=None, x_put_eos=True, y_put_eos=True):
+    def make_batches(self, *args, **kwargs):
+        return list(self.make_batches_iter(*args, **kwargs))
+
+
+    def make_batches_iter(self, x, y, batch_capacity=None, x_put_eos=True, y_put_eos=True):
         batch_capacity = batch_capacity or (self.batch_capacity * 5)
         x_IDs = dp.gen_line2IDs(x, self.src_vocab, put_eos=x_put_eos)
         y_IDs = dp.gen_line2IDs(y, self.vocab, put_eos=y_put_eos)

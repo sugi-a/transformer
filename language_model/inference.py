@@ -7,8 +7,7 @@ logger = getLogger(__name__)
 from .lm import DecoderLanguageModel
 from ..components.utils import *
 from ..components import dataprocessing as dp
-from .datasetloader import make_const_capacity_batch_list
-from ..components import Inference as MTInference
+from ..components.inference import Inference as MTInference
 
 class Inference(MTInference):
     def __init__(self, model_dir, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=4, batch_capacity=None):
@@ -106,7 +105,7 @@ class Inference(MTInference):
                     self.ph_dict['x_len']: batch[1]}
 
 
-    def make_batches(self, x, batch_capacity=None):
+    def make_batches_iter(self, x, batch_capacity=None):
         batch_capacity = batch_capacity or self.batch_capacity
 
         return dp.gen_const_capacity_batch(

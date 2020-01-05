@@ -48,10 +48,10 @@ def pad_seqs(seqs, maxlen=None, PAD_ID=0):
 
 
 def gen_const_capacity_batch(seq_iter, capacity, PAD_ID=0):
-    seqs = deque()
-    lens = deque()
+    seqs = []
+    lens = []
     maxlen = 0
-    for seq in zip(seq_iter):
+    for seq in seq_iter:
         l = len(seq)
         if l > capacity:
             raise(ValueError, 'Sequence longer than batch capacity. ({} vs {})'.format(l, capacity))
@@ -59,8 +59,8 @@ def gen_const_capacity_batch(seq_iter, capacity, PAD_ID=0):
         batch_len = len(seqs)
         if max(maxlen, l) * (batch_len + 1) > capacity:
             yield (pad_seqs(seqs, maxlen=maxlen, PAD_ID=PAD_ID), lens)
-            seqs = deque()
-            lens = deque()
+            seqs = []
+            lens = []
             maxlen = 0
 
         maxlen = max(maxlen, l)
@@ -68,7 +68,7 @@ def gen_const_capacity_batch(seq_iter, capacity, PAD_ID=0):
         lens.append(l)
     
     if len(seqs) > 0:
-        yield pad_seqs(seqs, maxlen=maxlen, PAD_ID=PAD_ID)
+        yield pad_seqs(seqs, maxlen=maxlen, PAD_ID=PAD_ID), lens
 
 
 def gen_dual_const_capacity_batch(dual_seq_iter, capacity, PAD_ID=0):
@@ -83,8 +83,8 @@ def gen_dual_const_capacity_batch(dual_seq_iter, capacity, PAD_ID=0):
         lengths_i: Shape [batch_size], DType int
     """
     
-    seqs1, seqs2 = deque(), deque()
-    lens1, lens2 = deque(), deque()
+    seqs1, seqs2 = [], []
+    lens1, lens2 = [], []
     maxlen1, maxlen2 = 0, 0
 
     for seq1, seq2 in dual_seq_iter:
@@ -98,8 +98,8 @@ def gen_dual_const_capacity_batch(dual_seq_iter, capacity, PAD_ID=0):
             padded2 = pad_seqs(seqs2, maxlen=maxlen2, PAD_ID=PAD_ID)
             yield ((padded1, lens1), (padded2, lens2))
         
-            seqs1, seqs2 = deque(), deque()
-            lens1, lens2 = deque(), deque()
+            seqs1, seqs2 = [], []
+            lens1, lens2 = [], []
             maxlen1, maxlen2 = 0, 0
         
         maxlen1, maxlen2 = max(maxlen1, l1), max(maxlen2, l2)
