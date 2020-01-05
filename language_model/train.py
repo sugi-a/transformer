@@ -5,7 +5,8 @@ import tensorflow as tf
 from tensorflow.contrib.framework import nest
 import numpy as np
 
-from . import lm, datasetloader
+from . import datasetloader
+from .language_model import DecoderLanguageModel, load_model_config
 from ..components.utils import *
 from ..components import dataprocessing
 from ..components.model import label_smoothing
@@ -21,10 +22,7 @@ class Train:
         os.makedirs(self.logdir, exist_ok=True)
 
         # load model_config.py
-        self.config = {'model_dir': model_dir}
-        with open(self.model_dir + '/lm_config.py', 'r') as f:
-            exec(f.read(), self.config)
-
+        self.config = load_model_config(model_dir, 'lm_config.py')
         self.params = self.config['params']
 
         # Computation options
@@ -188,7 +186,7 @@ class Train:
         
         # model
         tf.set_random_seed(self.random_seed)
-        model = lm.DecoderLanguageModel(params)
+        model = DecoderLanguageModel(params)
         self.model = model
         
         # initialize variables

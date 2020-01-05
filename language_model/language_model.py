@@ -1,3 +1,4 @@
+import os
 from logging import getLogger; logger = getLogger(__file__)
 import tensorflow as tf
 from tensorflow.contrib.framework import nest
@@ -85,3 +86,11 @@ class DecoderLanguageModel(tf.layers.Layer):
             self.params['vocab']['PAD_ID'])
 
         return hypos
+
+
+def load_model_config(model_dir, config_file_name='lm_config.py'):
+        config = {'model_dir': model_dir}
+        with open(os.path.join(model_dir, config_file_name)) as f:
+            exec(f.read(), config)
+        
+        return config

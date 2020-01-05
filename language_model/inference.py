@@ -4,7 +4,7 @@ import numpy as np
 from logging import getLogger, INFO, DEBUG, basicConfig
 logger = getLogger(__name__)
 
-from .lm import DecoderLanguageModel
+from .language_model import DecoderLanguageModel, load_model_config
 from ..components.utils import *
 from ..components import dataprocessing as dp
 from ..components.inference import Inference as MTInference
@@ -15,16 +15,9 @@ class Inference(MTInference):
         # Model's working directory
         self.model_dir = model_dir
 
-        # log dir
-        self.logdir = self.model_dir + '/log'
-
         # Load configuration
-        self.config = {'model_dir': model_dir}
-        with open(self.model_dir + '/lm_config.py', 'r') as f:
-            exec(f.read(), self.config)
-        
-        self.params = self.config["params"]
-        params = self.params
+        self.config = load_model_config(model_dir, 'lm_config.py')
+        self.params = params = self.config["params"]
 
         # Vocabulary utility
         self.vocab = dp.Vocabulary(
@@ -47,7 +40,7 @@ class Inference(MTInference):
         self.batch_capacity = batch_capacity or 8192 * self.n_gpus
 
         # Checkpoint
-        self.checkpoint = checkpoint or tf.train.latest_checkpoint(self.logdir + '/sup_checkpoint')
+        self.checkpoint = checkpoint or tf.train.latest_checkpoint(os.path.join(model_dir, 'log', 'sup_checkpoint'))
 
         # Session of this inference class. An instance is set by `self.make_session()`
         self.session = None
