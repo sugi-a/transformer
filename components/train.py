@@ -1,4 +1,4 @@
-import os, sys, argparse, time, json
+import os, sys, argparse, time, json, random
 from logging import getLogger, DEBUG, basicConfig; logger = getLogger(__name__)
 
 import tensorflow as tf
@@ -9,6 +9,7 @@ import numpy as np
 from .utils import *
 from .model import *
 from . import dataprocessing
+from . import dataprocessing_v2 as dp2
 from .inference import Inference
 
 class Train:
@@ -123,53 +124,125 @@ class Train:
     def train(self):
         logger.info('Transformer training.')
         
-        np.random.seed(0)
+        np.random.seed(self.random_seed)
+        random.seed(self.random_seed)
+
         params = self.params
 
+        # Vocabulary
+        source_vocab = dp2.Vocabulary(
+            params['vocab']['source_dict'],
+            PAD_ID=params['vocab']['PAD_ID'],
+            EOS_ID=params['vocab']['EOS_ID'],
+            UNK_ID=params['vocab']['UNK_ID'])
+
+        target_vocab = dp2.Vocabulary(
+            params['vocab']['target_dict'],
+            PAD_ID=params['vocab']['PAD_ID'],
+            EOS_ID=params['vocab']['EOS_ID'],
+            UNK_ID=params['vocab']['UNK_ID'])
+
+        target_vocab = dp2.Vocabulary(params['vocab']['source_dict'])
+
         # train dataset
-        if params["train"]["batch"]["fixed_capacity"]:
-            logger.info('Calling make_dataset_source_target_const_capacity_batch')
-            train_data = dataprocessing.make_dataset_source_target_const_capacity_batch(
-                params["train"]["data"]["source_train"],
-                params["train"]["data"]["target_train"],
-                params["vocab"]["source_dict"],
-                params["vocab"]["target_dict"],
-                UNK_ID=params["vocab"]["UNK_ID"],
-                EOS_ID=params["vocab"]["EOS_ID"],
-                PAD_ID=params["vocab"]["PAD_ID"],
-                batch_capacity=params["train"]["batch"]["capacity"] // self.n_gpus,
-                order_mode='sort' if params["train"]["batch"]["sort"] else "shuffle",
-                allow_skip=True)
-            train_data = train_data.prefetch(self.n_gpus * 2)
+        #if params["train"]["batch"]["fixed_capacity"]:
+        #    logger.info('Calling make_dataset_source_target_const_capacity_batch')
+        #    train_data = dataprocessing.make_dataset_source_target_const_capacity_batch(
+        #        params["train"]["data"]["source_train"],
+        #        params["train"]["data"]["target_train"],
+        #        params["vocab"]["source_dict"],
+        #        params["vocab"]["target_dict"],
+        #        UNK_ID=params["vocab"]["UNK_ID"],
+        #        EOS_ID=params["vocab"]["EOS_ID"],
+        #        PAD_ID=params["vocab"]["PAD_ID"],
+        #        batch_capacity=params["train"]["batch"]["capacity"] // self.n_gpus,
+        #        order_mode='sort' if params["train"]["batch"]["sort"] else "shuffle",
+        #        allow_skip=True)
+        #    train_data = train_data.prefetch(self.n_gpus * 2)
+        #else:
+        #    train_data = (dataprocessing.make_dataset_source_target(
+        #                    params["train"]["data"]["source_train"],
+        #                    params["train"]["data"]["target_train"],
+        #                    params["vocab"]["source_dict"],
+        #                    params["vocab"]["target_dict"],
+        #                    UNK_ID=params["vocab"]["UNK_ID"],
+        #                    EOS_ID=params["vocab"]["EOS_ID"],
+        #                    shuffle_size=2000*1000,
+        #                    ncpu=self.n_cpu_cores)
+        #        .padded_batch(params["train"]["batch"]["size"] // self.n_gpus,
+        #              (([None], []), ([None], [])),
+        #              ((params["vocab"]["PAD_ID"], 0), (params["vocab"]["PAD_ID"], 0)))
+        #        .prefetch(self.n_gpus * 2))
+        src_IDs = dp2.CallGenWrapper(lambda: params['train']['data']['source_train']
+            ).map(dp2.gen_lines_from_files).map(dp2.gen_line2IDs, source_vocab)
+        trg_IDs = dp2.CallGenWrapper(lambda: params['train']['data']['target_train']
+            ).map(dp2.gen_lines_from_files).map(dp2.gen_line2IDs, target_vocab)
+        src_trg_IDs = dp2.CallGenWrapper.zip(src_IDs, trg_IDs)
+
+        if params['train']['batch']['fixed_capacity']:
+            if params['train']['batch'].get('length_smoothing_sort', True):
+                src_trg_IDs = src_trg_IDs.map(
+                    dp2.gen_length_smooth_sorted_seq,
+                    buffer_size=params['train']['batch']['lss_buffer_size'])
+            else:
+                src_trg_IDs = src_trg_IDs.map(
+                    dp2.gen_random_sample,
+                    buffer_size=params['train']['batch']['shuffle_buffer_size'])
+            src_trg_IDs = src_trg_IDs.map(
+                dp2.gen_dual_const_capacity_batch,
+                params['train']['batch']['capacity'] // self.n_gpus,
+                PAD_ID=source_vocab.PAD_ID)
+
+            train_data = tf.data.Dataset.from_generator(
+                src_trg_IDs,
+                ((tf.int32, tf.int32), (tf.int32, tf.int32)),
+                (([None, None], []), ([None, None], [])))
+            if params['train']['batch'].get('length_smoothing_sort', True):
+                # Batch-level shuffle
+                train_data = train_data.shuffle(params['train']['batch']['batch_shuffle_size']) \
+            train_data = train_data.prefetch(self.n_gpus)
         else:
-            train_data = (dataprocessing.make_dataset_source_target(
-                            params["train"]["data"]["source_train"],
-                            params["train"]["data"]["target_train"],
-                            params["vocab"]["source_dict"],
-                            params["vocab"]["target_dict"],
-                            UNK_ID=params["vocab"]["UNK_ID"],
-                            EOS_ID=params["vocab"]["EOS_ID"],
-                            shuffle_size=2000*1000,
-                            ncpu=self.n_cpu_cores)
-                .padded_batch(params["train"]["batch"]["size"] // self.n_gpus,
-                      (([None], []), ([None], [])),
-                      ((params["vocab"]["PAD_ID"], 0), (params["vocab"]["PAD_ID"], 0)))
-                .prefetch(self.n_gpus * 2))
+            train_data = tf.data.Dataset.from_generator(
+                src_trg_IDs,
+                (tf.int32, tf.int32),
+                ([None], [None])
+                ).shuffle(params['train']['batch']['shuffle_buffer_size']
+                ).map(lambda x: ((x[0], tf.shape(x[0])[0]), (x[1], tf.shape(x[1])[0]))
+                ).padded_batch(
+                    params["train"]["batch"]["size"] // self.n_gpus,
+                    (([None], []), ([None], [])),
+                    ((source_vocab.PAD_ID, 0), (source_vocab.PAD_ID, 0)))
+                .prefetch(self.n_gpus))
+
+
 
         # dev dataset
-        dev_data = dataprocessing.make_dataset_source_target(
-                        params["train"]["data"]["source_dev"],
-                        params["train"]["data"]["target_dev"],
-                        params["vocab"]["source_dict"],
-                        params["vocab"]["target_dict"],
-                        UNK_ID=params["vocab"]["UNK_ID"],
-                        EOS_ID=params["vocab"]["EOS_ID"],
-                        ncpu=self.n_cpu_cores
-                    )\
-            .padded_batch(params["train"]["batch"]["size"] // self.n_gpus,
-                          (([None], []), ([None], [])),
-                          ((params["vocab"]["PAD_ID"], 0), (params["vocab"]["PAD_ID"], 0)))\
-            .prefetch(self.n_gpus * 2)
+        #dev_data = dataprocessing.make_dataset_source_target(
+        #                params["train"]["data"]["source_dev"],
+        #                params["train"]["data"]["target_dev"],
+        #                params["vocab"]["source_dict"],
+        #                params["vocab"]["target_dict"],
+        #                UNK_ID=params["vocab"]["UNK_ID"],
+        #                EOS_ID=params["vocab"]["EOS_ID"],
+        #                ncpu=self.n_cpu_cores
+        #            )\
+        #    .padded_batch(params["train"]["batch"]["size"] // self.n_gpus,
+        #                  (([None], []), ([None], [])),
+        #                  ((params["vocab"]["PAD_ID"], 0), (params["vocab"]["PAD_ID"], 0)))\
+        #    .prefetch(self.n_gpus * 2)
+        dev_src_IDs = dp2.CallGenWrapper(lambda: dp2.gen_lines_from_file(params['train']['data']['source_dev'])
+            ).map(dp2.gen_line2IDs, source_vocab)
+        dev_trg_IDs = dp2.CallGenWrapper(lambda: dp2.gen_lines_from_file(params['train']['data']['target_dev'])
+            ).map(dp2.gen_line2IDs, target_vocab)
+        dev_src_trg_IDs = dp2.CallGenWrapper.zip(src_IDs, trg_IDs)
+        dev_data = tf.data.Dataset.from_generator(
+            dev_src_trg_IDs, (tf.int32, tf.int32), ([None], [None])
+            ).map(lambda x: ((x[0], tf.shape(x[0])[0]), (x[1], tf.shape(x[1])[0]))
+            ).padded_batch(
+                params["train"]["batch"]["size"] // self.n_gpus,
+                (([None], []), ([None], [])),
+                ((source_vocab.PAD_ID, 0), (source_vocab.PAD_ID, 0)))
+            .prefetch(self.n_gpus))
 
         # train/dev iterators and input tensors
         train_iterator = train_data.make_initializable_iterator()

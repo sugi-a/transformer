@@ -7,6 +7,7 @@ logger = getLogger(__name__)
 from .model import *
 from .utils import compute_parallel, merge_nested_dict, non_even_split
 from . import dataprocessing
+from . import dataprocessing_v2 as dp2
 from .decoding import BeamSearchKeys, length_penalty
 
 class Inference:
@@ -38,6 +39,13 @@ class Inference:
             UNK_ID= params["vocab"]["UNK_ID"],
             EOS_ID= params["vocab"]["EOS_ID"],
             PAD_ID= params["vocab"]["PAD_ID"])
+        
+        self.src_vocab = dp2.Vocabulary(
+            params['vocab']['source_dict'],
+            UNK_ID=params['vocab']['UNK_ID'],
+            EOS_ID=params['vocab']['EOS_ID'],
+            PAD_ID=params['vocab']['PAD_ID']
+        )
 
         # Select the method to convert IDs to tokens
         if 'IDs2text' in self.config:
@@ -164,6 +172,19 @@ class Inference:
                     self.ph_dict['init_y_len']: batch[1][1]}
 
 
+    def execute_op_iter(self, op, batches, _feed_dict=None):
+        assert self.session
+        for batch in batches:
+            feed_dict = self.make_feed_dict(batch)
+            if _feed_dict:
+                feed_dict.update(_feed_dict)
+            
+            res = self.session.run(op, feed_dict=feed_dict)
+            for bat_res in res:
+                for items in zip(*bat_res):
+                    yield items
+
+        
     def execute_op(self, op, batches, _feed_dict=None):
         """Evaluate `op` in the session. `op` must be created by `self.make_op`
         Args:
@@ -173,6 +194,8 @@ class Inference:
         Returns:
             Value of `op` in python list format (not numpy)"""
         assert self.session
+
+        batches = list(batches)
         
         run_results = []
         start_time = time.time()
@@ -208,16 +231,12 @@ class Inference:
                 saver.restore(self.session, self.checkpoint)
 
     
-    def make_batches(self, x, y, batch_capacity=None):
+    def make_batches(self, x, y, batch_capacity=None, x_put_eos=True, y_put_eos=True):
         batch_capacity = batch_capacity or (self.batch_capacity * 5)
-        return dataprocessing.make_batches_source_target_const_capacity_batch_from_list(
-            x, y,
-            self.params["vocab"]["source_dict"], self.params["vocab"]["target_dict"],
-            batch_capacity,
-            self.params["vocab"]["UNK_ID"],
-            self.params["vocab"]["PAD_ID"],
-            EOS_ID=self.params["vocab"]["EOS_ID"],
-            allow_skip=False)
+        x_IDs = dp2.gen_line2IDs(x, self.src_vocab, put_eos=x_put_eos)
+        y_IDs = dp2.gen_line2IDs(y, self.vocab, put_eos=y_put_eos)
+        return dp2.gen_dual_const_capacity_batch(zip(x_IDs, y_IDs), batch_capacity, self.vocab.PAD_ID)
+
 
     def calculate_sentence_perplexity(self, sources, targets):
         batches = self.make_batches(sources, targets)
