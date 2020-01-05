@@ -4,12 +4,14 @@ import numpy as np
 from logging import getLogger, INFO, DEBUG, basicConfig
 logger = getLogger(__name__)
 
-from .lm import DecoderLanguageModel, DecoderLanguageModel_V2
+from .lm import DecoderLanguageModel
 from ..components.utils import *
 from ..components import dataprocessing
 from .datasetloader import make_const_capacity_batch_list
+from ..components import Inference as MTInference
+from ..components import dataprocessing_v2 as dp2
 
-class Inference:
+class Inference(MTInference):
     def __init__(self, model_dir, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=4, batch_capacity=None):
 
         # Model's working directory
@@ -27,7 +29,7 @@ class Inference:
         params = self.params
 
         # Vocabulary utility
-        self.vocab = dataprocessing.Vocabulary(
+        self.vocab = dp2.Vocabulary(
             params["vocab"]["dict"],
             UNK_ID= params["vocab"]["UNK_ID"],
             EOS_ID= params["vocab"]["EOS_ID"],
@@ -100,78 +102,18 @@ class Inference:
         return [perp]
 
 
-    def make_op(self, fn):
-        """Create operation which computes the function specified with GPU(s) in parallel.
-        Args:
-            fn:
-                Args: inputs = ((x, x_len), (y, y_len))
-                Returns: tuple or list (ret1, ret2, ...). ret: [BATCH_SIZE, ...]
-        Returns:
-            list of replicated operations to be computed in parallel.
-            """
-        return compute_parallel(fn, self.inputs_parallel)
-
     def make_feed_dict(self, batch):
         return {self.ph_dict['x']: batch[0],
                     self.ph_dict['x_len']: batch[1]}
 
 
-    def execute_op(self, op, batches, _feed_dict=None):
-        """Evaluate `op` in the session. `op` must be created by `self.make_op`
-        Args:
-            op: operation created by `self.make_op`
-            batches: input data
-            _feed_dict: custom feed_dict
-        Returns:
-            Value of `op` in python list format (not numpy)"""
-        assert self.session
-        
-        run_results = []
-        start_time = time.time()
-        sys.stderr.write('{} steps\r'.format(len(batches)))
-        sys.stderr.flush()
-        for i, batch in enumerate(batches):
-            # feed_dict
-            feed_dict = self.make_feed_dict(batch)
-            if _feed_dict: feed_dict.update(_feed_dict)
-
-            run_results.extend(self.session.run(op, feed_dict=feed_dict))
-            sys.stderr.write('{:5.3f} sec/step, steps: {:4}/{:4}\t\r'.format(
-                (time.time() - start_time)/(i + 1), i+1, len(batches)))
-            sys.stderr.flush()
-
-        return [sum((x.tolist() for x in items), []) for items in zip(*run_results)]
-
-
-    def make_session(self, sess=None, checkpoint=None, reuse_session=True):
-        if sess is not None:
-            assert sess.graph is self.graph
-            self.session = sess
-        else:
-            if reuse_session and self.session:
-                return
-
-            if (not reuse_session) and self.session: self.session.close()
-
-            checkpoint = checkpoint or self.checkpoint
-            assert checkpoint is not None
-
-            with self.graph.as_default():
-                session_config = tf.ConfigProto()
-                session_config.allow_soft_placement = True
-                session = tf.Session(config=session_config, graph=self.graph)
-                self.session = session
-                saver = tf.train.Saver()
-                saver.restore(session, checkpoint)
-                self.session = session
-
-    
     def make_batches(self, x, batch_capacity=None):
         batch_capacity = batch_capacity or self.batch_capacity
 
-        data = self.vocab.text2IDs(x, False)
-        batches = make_const_capacity_batch_list(data, [len(d) for d in data], batch_capacity, self.vocab.PAD_ID)
-        return batches
+        return dp2.gen_const_capacity_batch(
+            dp2.gen_line2IDs(x, self.vocab, put_eos=False),
+            batch_capacity,
+            self.vocab.PAD_ID)
 
 
     def calculate_sentence_perplexity(self, x):
@@ -262,3 +204,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
