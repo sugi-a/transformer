@@ -6,9 +6,9 @@
             "size": 64,
             "capacity": 8192,
             "length_smoothing_sort": true,
-            "lss_buffer_size": 100000,
-            "batch_shuffle_buffer_size": 5000,
-            "shuffle_buffer_size": 500000,
+            "lss_buffer_size": 20000,
+            "batch_shuffle_buffer_size": 2000,
+            "shuffle_buffer_size": 200000,
             "//": [
                 "If `fixed_capacity` is true, batch size is variable. So `size` is ignored",
                 "If not `fixed_capacity`, `capacity` is ignored",

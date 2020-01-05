@@ -114,7 +114,7 @@ def gen_dual_const_capacity_batch(dual_seq_iter, capacity, PAD_ID=0):
         yield ((padded1, lens1), (padded2, lens2))
 
 
-def gen_length_smooth_sorted_seq(iters, buffer_size=10000, nbins=300):
+def gen_length_smooth_sorted_seq(iters, buffer_size=10000, nbins=250):
     """
     Args:
         iters: an iterator which gives (sequence iterator, iter2, iter3,...) at each call
