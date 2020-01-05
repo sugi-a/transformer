@@ -6,8 +6,7 @@ logger = getLogger(__name__)
 
 from .model import *
 from .utils import compute_parallel, merge_nested_dict, non_even_split
-from . import dataprocessing
-from . import dataprocessing_v2 as dp2
+from . import dataprocessing as dp
 from .decoding import BeamSearchKeys, length_penalty
 
 class Inference:
@@ -34,13 +33,13 @@ class Inference:
         logger.debug('Decode configuration: ' + str(params['test']['decode_config']))
 
         # Vocabulary utility
-        self.vocab = dataprocessing.Vocabulary(
+        self.vocab = dp.Vocabulary(
             params["vocab"]["target_dict"],
             UNK_ID= params["vocab"]["UNK_ID"],
             EOS_ID= params["vocab"]["EOS_ID"],
             PAD_ID= params["vocab"]["PAD_ID"])
         
-        self.src_vocab = dp2.Vocabulary(
+        self.src_vocab = dp.Vocabulary(
             params['vocab']['source_dict'],
             UNK_ID=params['vocab']['UNK_ID'],
             EOS_ID=params['vocab']['EOS_ID'],
@@ -233,9 +232,9 @@ class Inference:
     
     def make_batches(self, x, y, batch_capacity=None, x_put_eos=True, y_put_eos=True):
         batch_capacity = batch_capacity or (self.batch_capacity * 5)
-        x_IDs = dp2.gen_line2IDs(x, self.src_vocab, put_eos=x_put_eos)
-        y_IDs = dp2.gen_line2IDs(y, self.vocab, put_eos=y_put_eos)
-        return dp2.gen_dual_const_capacity_batch(zip(x_IDs, y_IDs), batch_capacity, self.vocab.PAD_ID)
+        x_IDs = dp.gen_line2IDs(x, self.src_vocab, put_eos=x_put_eos)
+        y_IDs = dp.gen_line2IDs(y, self.vocab, put_eos=y_put_eos)
+        return dp.gen_dual_const_capacity_batch(zip(x_IDs, y_IDs), batch_capacity, self.vocab.PAD_ID)
 
 
     def calculate_sentence_perplexity(self, sources, targets):

@@ -6,10 +6,9 @@ logger = getLogger(__name__)
 
 from .lm import DecoderLanguageModel
 from ..components.utils import *
-from ..components import dataprocessing
+from ..components import dataprocessing as dp
 from .datasetloader import make_const_capacity_batch_list
 from ..components import Inference as MTInference
-from ..components import dataprocessing_v2 as dp2
 
 class Inference(MTInference):
     def __init__(self, model_dir, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=4, batch_capacity=None):
@@ -29,7 +28,7 @@ class Inference(MTInference):
         params = self.params
 
         # Vocabulary utility
-        self.vocab = dp2.Vocabulary(
+        self.vocab = dp.Vocabulary(
             params["vocab"]["dict"],
             UNK_ID= params["vocab"]["UNK_ID"],
             EOS_ID= params["vocab"]["EOS_ID"],
@@ -110,8 +109,8 @@ class Inference(MTInference):
     def make_batches(self, x, batch_capacity=None):
         batch_capacity = batch_capacity or self.batch_capacity
 
-        return dp2.gen_const_capacity_batch(
-            dp2.gen_line2IDs(x, self.vocab, put_eos=False),
+        return dp.gen_const_capacity_batch(
+            dp.gen_line2IDs(x, self.vocab, put_eos=False),
             batch_capacity,
             self.vocab.PAD_ID)
 
