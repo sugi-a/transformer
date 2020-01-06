@@ -66,14 +66,12 @@ class Inference(MTInference):
         # Computation graph components
         with self.graph.as_default():
             # Placeholder for input data
-            self.ph_dict = {
-                'x': tf.placeholder(tf.int32, [None, None]),
-                'x_len': tf.placeholder(tf.int32, [None])
-            }
+            self.default_phs = (
+                tf.placeholder(tf.int32, [None, None]),
+                tf.placeholder(tf.int32, [None]))
 
             # Splitting for data parallel computing
-            self.inputs_parallel = non_even_split(
-                (self.ph_dict['x'], self.ph_dict['x_len']), self.n_gpus)
+            self.default_parallel_inputs = non_even_split(self.default_phs, self.n_gpus)
             
             # Computation graph for perplexity
             self.op_perplexity = self.make_op(self.fn_perplexity)

@@ -1,5 +1,6 @@
 import argparse, sys, os, time, json
 import tensorflow as tf
+from tensorflow.contrib.framework import nest
 import numpy as np
 from logging import getLogger, INFO, DEBUG, basicConfig
 logger = getLogger(__name__)
@@ -8,6 +9,33 @@ from .model import *
 from .utils import compute_parallel, merge_nested_dict, non_even_split
 from . import dataprocessing as dp
 from .decoding import BeamSearchKeys, length_penalty
+
+
+class InferenceOpPH:
+    """Inference operator container with tf.placeholder"""
+    def __init__(self, op, placeholders):
+        self.op = op
+        self.flatten_ph = nest.flatten(placeholders)
+
+
+    def make_feed_dict(self, batch):
+        flatten_batch = nest.flatten(batch)
+        return {ph: bat for ph, bat in zip(self.flatten_ph, flatten_batch)}
+
+
+class InferenceOpDS:
+    """Inference operator container with tf.data.Dataset"""
+    def __init__(self, op, input_iter):
+        self.op = op
+        self.input_iter = input_iter
+
+    
+    def make_dataset(self, batch_generator, nprefetch=2):
+        return tf.data.Dataset.from_generator(
+            batch_generator,
+            self.input_iter.output_types,
+            self.input_iter.output_shapes
+        ).prefetch(nprefetch)
 
 class Inference:
     def __init__(self, model_dir, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=4, batch_capacity=None, decode_config=None):
@@ -85,24 +113,19 @@ class Inference:
 
         # Computation graph components
         with self.graph.as_default():
-            # Placeholder for input data
-            self.ph_dict = {
-                'x': tf.placeholder(tf.int32, [None, None]),
-                'x_len': tf.placeholder(tf.int32, [None]),
-                'init_y': tf.placeholder(tf.int32, [None, None]),
-                'init_y_len': tf.placeholder(tf.int32, [None])
-            }
+            # Default placeholder for input data
+            self.default_phs = (
+                (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None])),
+                (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None]))
+                )
 
             # Splitting for data parallel computing
-            self.inputs_parallel = non_even_split(
-                ((self.ph_dict['x'], self.ph_dict['x_len']),
-                (self.ph_dict['init_y'], self.ph_dict['init_y_len'])), self.n_gpus)
+            self.default_parallel_inputs = non_even_split(self.default_phs, self.n_gpus)
             
+            # Operations
             # computation graph for beam search
             self.ph_beam_size = tf.placeholder(tf.int32, [])
-            self.op_beam_hypos_scores = self.make_op(
-                self.fn_beam_search,
-                self.ph_beam_size)
+            self.op_beam_hypos_scores = self.make_op(self.fn_beam_search, self.ph_beam_size)
 
             # Computation graph for perplexity
             self.op_perplexity = self.make_op(self.fn_perplexity)
@@ -111,12 +134,12 @@ class Inference:
             self.ph_length_penalty = tf.placeholder(tf.float64, [])
             self.op_trans_score = self.make_op(self.fn_translation_score)
 
-    def fn_beam_search(self, inputs, ph_beam_size):
+    def fn_beam_search(self, inputs, beam_size):
         (x, x_len), (init_y, init_y_len) = inputs
         beam_candidates, scores = self.model.decode_V2(
             x,
             x_len,
-            ph_beam_size,
+            beam_size,
             return_search_results=True,
             init_y=init_y,
             init_y_len=init_y_len)
@@ -153,7 +176,7 @@ class Inference:
         
         return [score]
 
-    def make_op(self, fn, *args, **kwargs):
+    def make_op(self, fn, *args, input_phs=None, **kwargs):
         """Create operation which computes the function specified with GPU(s) in parallel.
         Args:
             fn:
@@ -162,19 +185,22 @@ class Inference:
         Returns:
             list of replicated operations to be computed in parallel.
             """
-        return compute_parallel(fn, self.inputs_parallel, *args, **kwargs)
 
-    def make_feed_dict(self, batch):
-        return {self.ph_dict['x']: batch[0][0],
-                    self.ph_dict['x_len']: batch[0][1],
-                    self.ph_dict['init_y']: batch[1][0],
-                    self.ph_dict['init_y_len']: batch[1][1]}
+        if input_phs is None:
+            input_phs = self.default_phs
+            op = compute_parallel(fn, self.default_parallel_inputs, *args, **kwargs)
+        else:
+            parallel_inputs = non_even_split(input_phs, self.n_gpus)
+            op = compute_parallel(fn, parallel_inputs, *args, **kwargs)
+
+        return InferenceOpPH(op, input_phs)
 
 
     def execute_op_iter(self, op, batches_iter, _feed_dict=None):
         assert self.session
+
         for batch in batches_iter:
-            feed_dict = self.make_feed_dict(batch)
+            feed_dict = op.make_feed_dict(batch)
             if _feed_dict:
                 feed_dict.update(_feed_dict)
             
@@ -200,7 +226,7 @@ class Inference:
         sys.stderr.flush()
         for i, batch in enumerate(batches):
             # feed_dict
-            feed_dict = self.make_feed_dict(batch)
+            feed_dict = op.make_feed_dict(batch)
             if _feed_dict: feed_dict.update(_feed_dict)
 
             run_results.extend(self.session.run(op, feed_dict=feed_dict))
