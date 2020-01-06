@@ -42,12 +42,12 @@ class DecoderLanguageModel(tf.layers.Layer):
         assert self.built
 
         if shift_dec_inputs:
-            x_shift = tf.concat(
+            x = tf.concat(
                 [tf.fill([tf.shape(x)[0], 1], self.params['vocab']['SOS_ID']), x[:,:-1]], axis=1)
 
         cache = self.make_cache(tf.shape(x)[1], layer_cache=False, offsets=offsets)
 
-        return self.get_logits_w_cache(x_shift, cache, training=training)
+        return self.get_logits_w_cache(x, cache, training=training)
 
 
     def call(self, inputs, training=False):
