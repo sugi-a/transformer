@@ -33,19 +33,60 @@ class Vocabulary:
         return [self.line2IDs(line, put_eos, put_sos) for line in text]
 
 
-    def IDs2text(self, IDs):
-        return [' '.join(self.ID2tok[id]
-            for id in sent if not id in self.ctrls) for sent in IDs]
+    def IDs2text(self, IDs, skip_control_symbols=True):
+        if skip_control_symbols:
+            return [' '.join(self.ID2tok[id]
+                for id in sent if not id in self.ctrls) for sent in IDs]
+        else:
+            return [' '.join(self.ID2tok[id]
+                for id in sent) for sent in IDs]
 
 
 def gen_line2IDs(line_iter, vocab, put_eos=True, put_sos=False):
     for line in line_iter:
         yield vocab.line2IDs(line)
 
+
+def list2numpy_nested(nested):
+    """Converts lists in the nested structure of dict and tuple into numpy arrays"""
+    if isinstance(nested, dict):
+        new = {k: list2numpy_nested(v) for k, v in nested.items()}
+    elif isinstance(nested, tuple):
+        new = tuple(list2numpy_nested(v) for v in nested)
+    elif isinstance(nested, list):
+        new = np.array(nested)
+    else:
+        new = nested
+
+    return new
+
+
+def gen_list2numpy_nested(nested_iter):
+    for nested in nested_iter:
+        yield list2numpy_nested(nested)
+
+
 def pad_seqs(seqs, maxlen=None, PAD_ID=0):
     maxlen = maxlen or max(len(seq) for seq in seqs)
     return [seq + [PAD_ID] * (maxlen - len(seq)) for seq in seqs]
 
+
+def gen_multi_padded_batch(multi_seq_iter, batch_size, PAD_ID=0):
+    batches = []
+    for items in multi_seq_iter:
+        if len(batches) == batch_size:
+            # [batch, nitmes]-> [nitems, batch]
+            yield tuple(
+                (pad_seqs(seqs, PAD_ID=PAD_ID), [len(seq) for seq in seqs])
+                for seqs in zip(*batches))
+            batches = []
+
+        batches.append(items)
+
+    if len(batches) > 0:
+        yield tuple(
+            (pad_seqs(seqs, PAD_ID=PAD_ID), [len(seq) for seq in seqs])
+            for seqs in zip(*batches))
 
 def gen_const_capacity_batch(seq_iter, capacity, PAD_ID=0):
     seqs = []

@@ -19,7 +19,7 @@ class InferenceOpPH:
 
 
     def make_feed_dict(self, batch):
-        flatten_batch = nest.flatten(batch)
+        flatten_batch = nest.flatten(dp.list2numpy_nested(batch))
         return {ph: bat for ph, bat in zip(self.flatten_ph, flatten_batch)}
 
 
@@ -204,7 +204,7 @@ class Inference:
             if _feed_dict:
                 feed_dict.update(_feed_dict)
             
-            res = self.session.run(op, feed_dict=feed_dict)
+            res = self.session.run(op.op, feed_dict=feed_dict)
             for bat_res in res:
                 for items in zip(*bat_res):
                     yield items
@@ -229,7 +229,7 @@ class Inference:
             feed_dict = op.make_feed_dict(batch)
             if _feed_dict: feed_dict.update(_feed_dict)
 
-            run_results.extend(self.session.run(op, feed_dict=feed_dict))
+            run_results.extend(self.session.run(op.op, feed_dict=feed_dict))
             sys.stderr.write('{:5.3f} sec/step, steps: {:4}/{:4}\t\r'.format(
                 (time.time() - start_time)/(i + 1), i+1, len(batches)))
             sys.stderr.flush()
