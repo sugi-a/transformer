@@ -21,7 +21,6 @@ class DecodeAnalysis(Inference):
     def fn_topk_alternatives(self, inputs):
         (x, x_len), (y, y_len) = inputs
         logits = self.model.get_logits(x, y, x_len, y_len, False)
-        is_target = tf.sequence_mask(y_len, tf.shape(y)[1], dtype=tf.float32)
 
         probs = tf.math.softmax(logits)
 
@@ -34,7 +33,6 @@ class DecodeAnalysis(Inference):
     def fn_cumulative_log_prob(self, inputs, mode):
         (x, x_len), (y, y_len) = inputs
         logits = self.model.get_logits(x, y, x_len, y_len, False)
-        is_target = tf.sequence_mask(y_len, tf.shape(y)[1], dtype=tf.float32)
 
         logp = tf.math.log_softmax(logits, axis=-1)
 
