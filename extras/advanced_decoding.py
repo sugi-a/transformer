@@ -23,13 +23,15 @@ class PMIFusionDecoder(Inference):
         with self.graph.as_default():
             self.op_fusion_decode = self.make_op(self.fn_fusion_decode)
             self.op_fusion_decode2 = self.make_op(self.fn_fusion_decode, 1, {'beam_size':self.ph_beam_size})
+            self.op_cumu_pmi = self.make_op(self.fn_cumulative_pmi)
 
-            self.op_top_pmi = self.make_op(
-                self.fn_top_pmi,
-                input_phs=tuple(
-                    (tf.placeholder(tf.int32, [None,None]), tf.placeholder(tf.int32, [None]))
-                    for i in range(3))
-            )
+            # Triple batch placeholder
+            ph_x_y_c = tuple((tf.placeholder(tf.int32, [None,None]), tf.placeholder(tf.int32, [None])) for i in range(3))
+
+            self.op_cumu_score = self.make_op(self.fn_cumulative_score, input_phs=ph_x_y_c)
+            self.op_cumu_score2 = self.make_op(self.fn_cumulative_score, 1, {'beam_size':self.ph_beam_size}, input_phs=ph_x_y_c)
+
+            self.op_top_pmi = self.make_op(self.fn_top_pmi, input_phs=ph_x_y_c)
 
 
     def make_session(self, *args, **kwargs):
@@ -128,7 +130,7 @@ class PMIFusionDecoder(Inference):
         pTM = self.tm.get_logits_w_cache(dec_inputs, cache['TM'])
         pLM = self.lm.get_logits_w_cache(dec_inputs, cache['LM'])
         pCTXLM = self.lm.get_logits_w_cache(ctx_inputs, cache['ctxLM'])[:, -1:]
-        
+
         # Fusion
         if option == 0:
             # Normal fusion by adding logits
@@ -136,34 +138,75 @@ class PMIFusionDecoder(Inference):
         elif option == 1:
             p_fusion = pTM + pCTXLM - pLM
             TM_top_logits, TM_top_inds = tf.math.top_k(pTM, config['beam_size'], True)
-            bias = 1e9 * tf.minimum(tf.sign(pTM - TM_top_logits[:, :, config['beam_size'] - 1]), 0)
+            bias = 1e9 * tf.minimum(tf.sign(pTM - TM_top_logits[:, :, config['beam_size'] - 1:config['beam_size']]), 0)
             p_fusion += bias
 
 
         return p_fusion
 
+    
+    def conditional_y_logits(self, y, y_len, c, c_len):
+        batch_size = tf.shape(y)[0]
+        # Shift c
+        c = tf.concat([tf.fill([batch_size, 1], self.tm.params['vocab']['SOS_ID']), c[:, :-1]], axis=1)
+        c, offsets = align_to_right(c, c_len)
+        # Join c and y and remove the last token
+        cy = tf.concat([c, y], axis=1)[:, :-1]
+        cy_len = c_len + y_len - 1
+
+        return self.lm.get_logits(cy, shift_dec_inputs=False, offsets=offsets
+            )[:, tf.shape(c)[1] - 1:]
+
+    def pmi_logits(self, y, y_len, c, c_len):
+        # top pmis [batch, y_len, vocab]
+        py_logits = self.lm.get_logits(y)
+        cond_y_logits = self.conditional_y_logits(y, y_len, c, c_len)
+        pmi_logits = cond_y_logits - py_logits
+
+        return pmi_logits
+
+
+    def fn_cumulative_score(self, inputs, mode=0, config=None):
+        (x, x_len), (y, y_len), (c, c_len) = inputs
+        y_logits = self.lm.get_logits(y)
+        cond_y_logits = self.conditional_y_logits(y, y_len, c, c_len)
+        pmi_logits = cond_y_logits - y_logits
+        mt_logits = self.tm.get_logits(x, y, x_len, y_len)
+        score_logits = pmi_logits + mt_logits
+
+        if mode == 1:
+            mt_top_logits, top_inds = tf.math.top_k(mt_logits, config['beam_size'], True)
+            bias = 1e9 * tf.minimum(tf.sign(mt_logits - mt_top_logits[:, :, config['beam_size'] - 1:config['beam_size']]), 0)
+            score_logits += bias
+
+        norm_score = tf.math.log_softmax(score_logits, axis=-1) 
+
+        score = tf.batch_gather(norm_score, y[:, :, None])[:, :, 0]
+        cum_score = tf.math.cumsum(score, axis=1)
+
+        return cum_score, score
+
+
+    def fn_cumulative_pmi(self, inputs):
+        (y, y_len), (c, c_len) = inputs
+        y_logits = self.lm.get_logits(y)
+        cond_y_logits = self.conditional_y_logits(y, y_len, c, c_len)
+
+        norm_y = tf.batch_gather(tf.math.log_softmax(y_logits), y[:,:,None])[:,:,0]
+        norm_cond_y = tf.batch_gather(tf.math.log_softmax(cond_y_logits), y[:,:,None])[:,:,0]
+
+        cum_y = tf.math.cumsum(norm_y, axis=1)
+        cum_cond_y = tf.math.cumsum(norm_cond_y, axis=1)
+        pmi = norm_cond_y - norm_y
+        cum_pmi = cum_cond_y - cum_y
+        return cum_pmi, pmi, cum_y, norm_y, cum_cond_y, norm_cond_y
 
 
     def fn_top_pmi(self, inputs):
         (x, x_len), (y, y_len), (c, c_len) = inputs
 
-        batch_size = tf.shape(y)[0]
-
-        pos0 = tf.fill([batch_size, 1], self.tm.params['vocab']['SOS_ID'])
-        
-        # Shift c
-        c = tf.concat([pos0, c[:, :-1]], axis=1)
-        c, offsets = align_to_right(c, c_len)
-        # Join c and y
-        cy = tf.concat([c, y], axis=1)
-        cy_len = c_len + y_len
-
-        # top pmis [batch, y_len, vocab]
-        py_logits = self.lm.get_logits(y)
-        cond_y_logits = self.lm.get_logits(cy, shift_dec_inputs=False, offsets=offsets
-            )[:, tf.shape(c)[1]:]
-        pmi_logits = cond_y_logits - py_logits
-        top_pmi_logits, pmi_inds = tf.math.top_k(cond_y_logits, self.ph_beam_size)
+        pmi_logits = self.pmi_logits(y, y_len, c, c_len)
+        top_pmi_logits, pmi_inds = tf.math.top_k(pmi_logits, self.ph_beam_size)
         pmi = top_pmi_logits - tf.math.reduce_logsumexp(pmi_logits, axis=-1, keepdims=True)
 
         # top log p(y|x)
@@ -179,8 +222,11 @@ class PMIFusionDecoder(Inference):
         # pmi for top logp(y|x)
         top_pyx_pmi = tf.batch_gather(pmi_logits, pyx_inds) - tf.math.reduce_logsumexp(pmi_logits, axis=-1, keepdims=True)
 
+        # score for top logp(y|x)
+        top_pyx_score = tf.batch_gather(fusion_logits, pyx_inds) - tf.math.reduce_logsumexp(fusion_logits, axis=-1, keepdims=True)
 
-        return pmi, pmi_inds, logpyx, pyx_inds, fusion_score, fusion_inds, top_pyx_pmi
+
+        return pmi, pmi_inds, logpyx, pyx_inds, fusion_score, fusion_inds, top_pyx_pmi, top_pyx_score
 
 
     def top_pmi_analysis(self, x, y, c, k=8):
@@ -191,3 +237,21 @@ class PMIFusionDecoder(Inference):
         return self.execute_op(self.op_top_pmi, batches, {self.ph_beam_size: k})
 
 
+    def cumulative_score(self, x, y, c, option=0, beam_size=1):
+        x = dp.gen_line2IDs(x, self.src_vocab, put_eos=True)
+        y,c = (dp.gen_line2IDs(_, self.vocab, put_eos=True) for _ in (y, c))
+        batches = list(dp.gen_multi_padded_batch(
+            zip(x, y, c), self.batch_capacity // 128, self.vocab.PAD_ID))
+
+        if option == 0:
+            op = self.op_cumu_score
+        elif option == 1:
+            op = self.op_cumu_score2
+        return self.execute_op(op, batches, {self.ph_beam_size: beam_size})
+
+    
+    def cumulative_pmi(self, y, c):
+        c = dp.gen_line2IDs(c, self.vocab, put_eos=True)
+        y = dp.gen_line2IDs(y, self.vocab, put_eos=False)
+        batches = list(dp.gen_dual_const_capacity_batch(zip(y,c), self.batch_capacity, self.vocab.PAD_ID))
+        return self.execute_op(self.op_cumu_pmi, batches)
