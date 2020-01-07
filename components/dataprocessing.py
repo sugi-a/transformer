@@ -44,7 +44,7 @@ class Vocabulary:
 
 def gen_line2IDs(line_iter, vocab, put_eos=True, put_sos=False):
     for line in line_iter:
-        yield vocab.line2IDs(line)
+        yield vocab.line2IDs(line, put_eos=put_eos, put_sos=put_sos)
 
 
 def list2numpy_nested(nested):
