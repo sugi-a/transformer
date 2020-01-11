@@ -13,23 +13,38 @@ from .decoding import BeamSearchKeys, length_penalty
 
 class InferenceOpPH:
     """Inference operator container with tf.placeholder"""
-    def __init__(self, op, placeholders):
-        self.op = op
-        self.flatten_ph = nest.flatten(placeholders)
+    def __init__(self, op_fn, data_ph):
+        self.flat_data_ph = nest.flatten(data_ph)
+        self.op_fn = op_fn
+        self.__op = None
+
+
+    @property
+    def op():
+        if self.__op is None:
+            self._op = self.op_fn()
+        return self.__op
 
 
     def make_feed_dict(self, batch):
         flatten_batch = nest.flatten(dp.list2numpy_nested(batch))
-        return {ph: bat for ph, bat in zip(self.flatten_ph, flatten_batch)}
+        return {ph: bat for ph, bat in zip(self.flat_data_ph, flatten_batch)}
 
 
 class InferenceOpDS:
     """Inference operator container with tf.data.Dataset"""
-    def __init__(self, op, input_iter):
-        self.op = op
+    def __init__(self, op_fn, input_iter):
+        self.op_fn = op_fn
         self.input_iter = input_iter
 
     
+    @property
+    def op():
+        if self.__op is None:
+            self._op = self.op_fn()
+        return self.__op
+
+
     def make_dataset(self, batch_generator, nprefetch=2):
         return tf.data.Dataset.from_generator(
             batch_generator,
@@ -188,12 +203,12 @@ class Inference:
 
         if input_phs is None:
             input_phs = self.default_phs
-            op = compute_parallel(fn, self.default_parallel_inputs, *args, **kwargs)
+            op_fn = lambda: compute_parallel(fn, self.default_parallel_inputs, *args, **kwargs)
         else:
             parallel_inputs = non_even_split(input_phs, self.n_gpus)
-            op = compute_parallel(fn, parallel_inputs, *args, **kwargs)
+            op_fn = lambda: compute_parallel(fn, parallel_inputs, *args, **kwargs)
 
-        return InferenceOpPH(op, input_phs)
+        return InferenceOpPH(op_fn, input_phs)
 
 
     def execute_op_iter(self, op, batches_iter, _feed_dict=None):
