@@ -16,7 +16,6 @@ class DecodeAnalysis(Inference):
         self.op_cum_logp = self.make_op(self.fn_cumulative_log_prob, 'logp')
         self.op_cum_score = self.make_op(self.fn_cumulative_log_prob, 'score')
         self.op_cum_ppl = self.make_op(self.fn_cumulative_log_prob, 'ppl')
-        self.make_session()
 
     def fn_topk_alternatives(self, inputs):
         (x, x_len), (y, y_len) = inputs
@@ -46,7 +45,7 @@ class DecodeAnalysis(Inference):
         if mode == 'logp':
             pass
         elif mode == 'score':
-            logp = logp / length_penalty(tf.range(tf.shape(y)[1]) + 1, self.params['test']['length_penalty_a'])
+            logp = logp / length_penalty(tf.range(tf.shape(y)[1]) + 1, self.params['test']['decode_config']['length_penalty_a'])
         elif mode == 'ppl':
             logp = tf.math.exp(- logp / tf.cast(tf.range(tf.shape(y)[1]) + 1, tf.float32))
 
@@ -113,6 +112,7 @@ def main():
     args = parser.parse_args()
 
     dec_analysis = DecodeAnalysis(args.model_dir, n_gpus=args.n_gpus)
+    dec_analysis.make_session()
 
     if args.mode == 'alts':
         with open(args.source_file, 'r') as f:
