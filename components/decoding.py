@@ -342,7 +342,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
     return seq, score
 
 
-def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlens, eos_id, pad_id=0, offsets=None, params=None):
+def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlens, eos_id, pad_id=0, offsets=None, params=None, normalize_logits=True):
     """<sos> in `init_seq` is not removed."""
     NEG_INF = -1e9
 
@@ -447,8 +447,12 @@ def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlen
                     assert False
 
                 # get the log probabilities ->[bat * beam, beam] 
-                with tf.name_scope('logits_to_log_prob'):
-                    log_prob = top_logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True) 
+                if normalize_logits:
+                    with tf.name_scope('logits_to_log_prob'):
+                        log_prob = top_logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True) 
+                else:
+                    log_prob = top_logits
+
                 # Arrange shape of log_prob and ids
                 with tf.name_scope('restore_shape'):
                     # log prob. [bat * beam, beam]->[bat, old_beam * new_beam]
