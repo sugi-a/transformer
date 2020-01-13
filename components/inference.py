@@ -20,9 +20,9 @@ class InferenceOpPH:
 
 
     @property
-    def op():
+    def op(self):
         if self.__op is None:
-            self._op = self.op_fn()
+            self.__op = self.op_fn()
         return self.__op
 
 
@@ -39,7 +39,7 @@ class InferenceOpDS:
 
     
     @property
-    def op():
+    def op(self):
         if self.__op is None:
             self._op = self.op_fn()
         return self.__op
