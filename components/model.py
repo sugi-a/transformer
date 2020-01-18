@@ -651,7 +651,7 @@ class Transformer(tf.layers.Layer):
                 [tf.fill([tf.shape(x)[0], 1], self.params["vocab"]["SOS_ID"]), init_y[:, :-1]], axis=1)
 
             # Align to the right [batch, len]
-            init_y, offsets = align_to_right(init_y, init_y_len)
+            init_y, offsets = align_to_right(init_y, init_y_len, self.params["vocab"]["PAD_ID"])
             cache = self.make_cache(x, x_len, training=False, layer_cache=True, offsets=offsets)
 
         # Maximum target length
