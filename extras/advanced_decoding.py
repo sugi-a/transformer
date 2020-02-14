@@ -15,12 +15,12 @@ from .tm_lm_fusion_beam_search import fusion_beam_search, fusion_beam_search_del
 
 
 class PMIFusionDecoder(Inference):
-    def __init__(self, lm_dir, *args, **kwargs):
+    def __init__(self, lm_dir, *args, lm_checkpoint=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.tm = self.model
 
         # Creating language model
-        self.lmi = LMInference(lm_dir, n_gpus=self.n_gpus, n_cpu_cores=self.n_cpu_cores, batch_capacity=self.batch_capacity//2)
+        self.lmi = LMInference(lm_dir, n_gpus=self.n_gpus, n_cpu_cores=self.n_cpu_cores, batch_capacity=self.batch_capacity//2, checkpoint=lm_checkpoint)
         self.lm = self.lmi.model
 
         with self.graph.as_default():
@@ -62,6 +62,9 @@ class PMIFusionDecoder(Inference):
     def fusion_decode(self, x, ctx, beam_size=8, ret_search_detail=False, option=0, length_penalty=None, init_y_last_ctok=False, pmi_delay=3):
         batch_capacity = self.batch_capacity // beam_size
         batches = self.make_batches(x, ctx, batch_capacity)
+        #x_IDs = dp.gen_line2IDs(x, self.src_vocab)
+        #y_IDs = dp.gen_line2IDs(ctx, self.vocab)
+        #batches = [(([x_ID], [len(x_ID)]), ([y_ID], [len(y_ID)])) for x_ID, y_ID in zip(x_IDs, y_IDs)]
 
         if length_penalty is None: length_penalty = self.params['test']['decode_config']['length_penalty_a']
 
@@ -209,10 +212,10 @@ class PMIFusionDecoder(Inference):
         elif option == 1:
             # Only keep top k=beam_size which are suggested by translation model. PMI for EOS is always 0.
             PMI = pCTXLM - pLM
-            PMI = tf.concat([PMI[:, :, :self.vocab.EOS_ID], tf.zeros_like(PMI[:,:,:1]), PMI[:,:,self.vocab.EOS_ID + 1:]], axis=-1)
             p_fusion = pTM + PMI
-            TM_top_logits, TM_top_inds = tf.math.top_k(pTM, config['beam_size'], True)
-            bias = 1e9 * tf.minimum(tf.sign(pTM - TM_top_logits[:, :, config['beam_size'] - 1:config['beam_size']]), 0)
+            max_mt = tf.math.reduce_max(pTM, axis=-1, keepdims=True)
+            threshold = max_mt - np.log(100)
+            bias = 1e9 * tf.minimum(tf.sign(pTM - threshold), 0)
             p_fusion += bias
         elif option == 2:
             # PMI as a score. Only keep ones suggested by TM
@@ -351,6 +354,7 @@ def print_score(args):
     decode_config = json.loads(args.decode_config) if args.decode_config is not None else None
     fdec = PMIFusionDecoder(
         args.lm_dir, args.tm_dir,
+        lm_checkpoint=args.lm_checkpoint,
         n_gpus=args.n_gpus, batch_capacity=args.batch_capacity,
         decode_config=decode_config)
     fdec.make_session()
@@ -377,6 +381,74 @@ def gen_docs(line_iter):
     if len(doc) > 0:
         yield doc
 
+
+def translate_documents_rerank(args):
+    decode_config = json.loads(args.decode_config) if args.decode_config is not None else None
+    if args.max_context_tokens is None and args.max_context_sents is None:
+        args.max_context_sents = 1
+    assert (args.max_context_sents is None) or (args.max_context_tokens is None)
+    
+    input_sents = sys.stdin.readlines()
+    docs = list(gen_docs(input_sents))
+    logger.info('#docs: {}, #sents: {}'.format(len(docs), len(input_sents) - len(docs)))
+
+    # Load translator
+    fdec = PMIFusionDecoder(
+        args.lm_dir, args.tm_dir,
+        lm_checkpoint=args.lm_checkpoint,
+        n_gpus=args.n_gpus, batch_capacity=args.batch_capacity,
+        decode_config=decode_config)
+    fdec.make_session()
+
+    # Create N-best lists
+    logger.debug('Creating n-best lists.')
+    hypo_docs = []
+    for doc in docs:
+        hypos, scores = fdec.translate_sentences(doc,
+            beam_size=args.beam_size,
+            return_search_results=True)
+        hypo_docs.append(hypos)
+
+    # Rerank
+    logger.debug('Reranking.')
+    trans_docs = []
+    for doc, hypos in zip(docs, hypo_docs):
+        ctx_q = deque()
+        trans = []
+        for x, nbest in zip(doc, hypos):
+            ctx_tiled = [' '.join(ctx_q)] * args.beam_size
+            x_tiled = [x] * args.beam_size
+
+            if args.method == 'pmi_rerank':
+                scores = fdec.lmi.calculate_pmi(ctx_tiled, nbest)
+            elif args.method == 'fusion_rerank':
+                scores = fdec.calculate_trans_score_w_context(x_tiled, nbest, ctx_tiled)
+            else:
+                raise
+
+            out = nbest[np.argmax(scores)]
+            trans.append(out)
+
+            # Update context queue
+            if args.max_context_sents is not None:
+                ctx_q.append(out)
+                if len(ctx_q) > args.max_context_sents:
+                    ctx_q.popleft()
+            else:
+                for tok in out.split():
+                    ctx_q.append(tok)
+                while len(ctx_q) > args.max_context_tokens:
+                    ctx_q.popleft()
+
+        trans_docs.append(trans)
+
+    # Output
+    for doc in trans_docs:
+        for line in doc:
+            print(line)
+        print('')
+
+
 def translate_documents(args):
     decode_config = json.loads(args.decode_config) if args.decode_config is not None else None
 
@@ -400,6 +472,7 @@ def translate_documents(args):
     # Load translator
     fdec = PMIFusionDecoder(
         args.lm_dir, args.tm_dir,
+        lm_checkpoint=args.lm_checkpoint,
         n_gpus=args.n_gpus, batch_capacity=args.batch_capacity,
         decode_config=decode_config)
     fdec.make_session()
@@ -411,7 +484,10 @@ def translate_documents(args):
         lines, doc_inds = zip(*a)
         ctx = [' '.join(contexts[i]) for i in doc_inds]
 
-        outs = fdec.fusion_decode(lines, ctx, beam_size=args.beam_size, option=args.mode, init_y_last_ctok=not args.init_y_sos)
+        outs = fdec.fusion_decode(
+            lines, ctx, beam_size=args.beam_size, option=args.mode,
+            init_y_last_ctok=not args.init_y_sos,
+            pmi_delay=args.pmi_delay)
 
 
         _count += len(outs)
@@ -423,10 +499,10 @@ def translate_documents(args):
             translations[i].append(out)
 
             # Update context queue
-            if args.max_context_sents:
+            if args.max_context_sents is not None:
+                contexts[i].append(out)
                 if len(contexts[i]) > args.max_context_sents:
                     contexts[i].popleft()
-                contexts[i].append(out)
             else:
                 for tok in out.split():
                     contexts[i].append(tok)
@@ -448,12 +524,15 @@ def translate_oracle_context(args):
     logger.info('Number of sents.: {}'.format(len(x)))
     logger.debug('[2nd src] {}\n[2nd ctx] {}'.format(x[1], c[1]))
 
-    fdec = PMIFusionDecoder(args.lm_dir, args.tm_dir, n_gpus=args.n_gpus,
+    fdec = PMIFusionDecoder(
+        args.lm_dir, args.tm_dir,
+        lm_checkpoint=args.lm_checkpoint,
+        n_gpus=args.n_gpus,
         batch_capacity=args.batch_capacity, decode_config=decode_config)
     fdec.make_session()
     
     if args.method == 'beam_search':
-        trans = fdec.fusion_decode(x, c, args.beam_size, option=args.mode, init_y_last_ctok=not args.init_y_sos)
+        trans = fdec.fusion_decode(x, c, args.beam_size, option=args.mode, init_y_last_ctok=not args.init_y_sos, pmi_delay=args.pmi_delay)
     elif args.method == 'pmi_rerank' or args.method == 'fusion_rerank' or args.method == 'normal_rerank':
         hypos, scores = fdec.translate_sentences(x, args.beam_size, return_search_results=True)
         hypos = sum(hypos, [])
@@ -488,6 +567,8 @@ def translate(args):
     else:
         if args.method == 'beam_search':
             translate_documents(args)
+        elif args.method == 'fusion_rerank' or args.method == 'pmi_rerank':
+            translate_documents_rerank(args)
 
 
 def main():
@@ -496,6 +577,7 @@ def main():
     parser.add_argument('--log_level', choices=list(logLvDic.keys()), default="info")
     parser.add_argument('--tm_dir', '-tm', '-t', type=str, required=True)
     parser.add_argument('--lm_dir', '-lm', '-l', type=str, required=True)
+    parser.add_argument('--lm_checkpoint', default=None, type=str)
     parser.add_argument('--n_gpus', type=int, default=1)
     parser.add_argument('--batch_capacity', '--capacity', type=int, default=None)
 
@@ -513,6 +595,7 @@ def main():
     trans.add_argument('--beam_size', type=int, default=8)
     trans.add_argument('--mode', type=int, default=1)
     trans.add_argument('--init_y_sos', action='store_true')
+    trans.add_argument('--pmi_delay', type=int, default=4)
     trans.add_argument('--decode_config', type=str, default=None)
     trans.set_defaults(handler=translate)
 

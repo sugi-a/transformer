@@ -383,16 +383,21 @@ def fusion_beam_search_delayed_pmi(get_logits_fn, init_cache, init_seq, beam_siz
                     # Fork log probability of sequences. [bat_size, beam * beam]. 
                     old_forked_seqp = fork(loop_vars['seq_log_prob'])
                     old_forked_seq_pmi = fork(loop_vars['seq_pmi'])
-
-                    # Fork the info of closed paths. [bat, beam]->[bat, beam * beam]
-                    forked_ended = fork(loop_vars['has_eos'])
+                    old_forked_pmi_q = fork(loop_vars['pmi_q'])
+                    old_forked_ended = fork(loop_vars['has_eos'])
 
                     # Update sequence log probability [bat, old_beam * new_beam]
-                    new_forked_seqp = old_forked_seqp + tf.where(forked_ended, eos_mask, log_prob)
-                    new_mt_score = get_score(new_forked_seqp, cur_pos[:, None] + 1)
+                    new_forked_seqp = old_forked_seqp + tf.where(old_forked_ended, eos_mask, log_prob)
+                    # Update pmi queue [bat, old_beam * new_beam, delay]
+                    new_forked_pmi_q = tf.concat([old_forked_pmi_q, tf.where(old_forked_ended, eos_mask, pmi)[:,:,None]], axis=2)
+                    popped = new_forked_pmi_q[:, :, 0]
+                    new_forked_pmi_q = new_forked_pmi_q[:,:, 1:]
+                    # Update sequence pmi [bat, old_beam * new_beam]
+                    new_forked_seq_pmi = old_forked_seq_pmi + popped
 
                     # Compute score for pruning [bat, old_beam * new_beam]
-                    prun_score = old_forked_seq_pmi + new_mt_score
+                    prun_score = new_forked_seq_pmi + new_forked_seqp
+                    prun_score = get_score(prun_score, cur_pos[:, None] + 1)
 
             with tf.name_scope('get_top_k'):
                 # Top k=beam [bat, beam]
@@ -420,19 +425,13 @@ def fusion_beam_search_delayed_pmi(get_logits_fn, init_cache, init_seq, beam_siz
                 new_vars['seq_log_prob'] = tf.batch_gather(new_forked_seqp, top_ind)
 
                 # UPDATE pmi queue [bat, beam, delay]
-                pmi_q = tf.batch_gather(loop_vars['pmi_q'], old_beam_ind)
-                # EOS mask for pmi. [bat, old_beam * new_beam]
-                pmi = tf.where(forked_ended, eos_mask, pmi) 
-                new_pmi = tf.batch_gather(pmi, top_ind)
-                # push and popleft
-                popped = pmi_q[:,:,0]
-                new_vars['pmi_q'] = tf.concat([pmi_q[:,:,1:], new_pmi[:,:,None]], axis=2)
+                new_vars['pmi_q'] = tf.batch_gather(new_forked_pmi_q, top_ind)
                 
                 # UPDATE sequence pmi [bat, beam]
-                new_vars['seq_pmi'] = tf.batch_gather(loop_vars['seq_pmi'], old_beam_ind) + popped
+                new_vars['seq_pmi'] = tf.batch_gather(new_forked_seq_pmi, top_ind)
 
-                # UPDATE score [bat, beam]
-                new_vars['score'] = tf.batch_gather(new_mt_score, top_ind) + new_vars['seq_pmi']
+                # UPDATE score [bat, beam].
+                new_vars['score'] = tf.batch_gather(prun_score, top_ind)
                 
                 # UPDATE `generated_seq`
                 # Choosing old branch. [bat, beam, ...]->[bat, beam, len]
@@ -541,6 +540,14 @@ def fusion_beam_search_delayed_pmi(get_logits_fn, init_cache, init_seq, beam_siz
 
         # Fianal sort
         with tf.name_scope('final_sort'):
+            # Pop one from the queue and add
+            if offsets is not None:
+                cur_pos = tf.shape(finish_state['generated_seq'])[2] + tf.shape(init_seq)[2] - 1 - offsets
+            else:
+                cur_pos = (tf.shape(finish_state['generated_seq'])[2] + tf.shape(init_seq)[2] - 1)[None]
+            popped =tf.concat([finish_state['pmi_q'], tf.zeros([batch_size, beam_size, 1])], axis=2)[:,:,0] 
+            finish_state['score'] = get_score(finish_state['seq_log_prob'] + finish_state['seq_pmi'] + popped, cur_pos)
+
             # If batch_size==0, top-k op fails. So add pseudo element.
             finish_state['score'] = tf.pad(finish_state['score'], [[0,1],[0,0]])
 
