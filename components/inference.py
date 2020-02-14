@@ -360,7 +360,7 @@ def main():
     # logger
     basicConfig(level=(INFO if args.log_level == 'INFO' else 'DEBUG'))
 
-    dec_conf = json.loads(args.decode_config_json) if args.decode_config_json else None
+    dec_conf = json.loads(args.decode_config_json) if args.decode_config_json is not None else None
 
     inference = Inference(
         args.model_dir,
