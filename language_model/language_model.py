@@ -38,12 +38,8 @@ class DecoderLanguageModel(tf.layers.Layer):
             offsets=cache.get('offsets', None))
 
 
-    def get_logits(self, x, training=False, shift_dec_inputs=True, offsets=None):
+    def get_logits(self, x, training=False, offsets=None):
         assert self.built
-
-        if shift_dec_inputs:
-            x = tf.concat(
-                [tf.fill([tf.shape(x)[0], 1], self.params['vocab']['SOS_ID']), x[:,:-1]], axis=1)
 
         cache = self.make_cache(tf.shape(x)[1], layer_cache=False, offsets=offsets)
 
@@ -72,8 +68,6 @@ class DecoderLanguageModel(tf.layers.Layer):
 
         # Add SOS to the head. 
         # Note: No need to remove the last token since it's not EOS
-        x = tf.concat([tf.fill([tf.shape(x)[0], 1], self.params['vocab']['SOS_ID']), x], axis=1)
-        x_len += 1
         
         hypos, scores = model.beam_search_decode(
             self.get_logits_w_cache,

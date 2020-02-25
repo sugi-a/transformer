@@ -75,13 +75,15 @@ class Train:
         
 
     def __get_train_info(self, inputs):
+        # y: <sos> content <eos>
+        # y_len: must take into account <sos> and <eos>
         (x, x_len), (y, y_len) = inputs
 
         # Logits [BATCH_SIZE, MAXLEN, NVOCAB]
-        logits = self.model.get_logits(x, y, x_len, y_len, True)
+        logits = self.model.get_logits(x, y[:,:-1], x_len, y_len - 1, training=True)
 
         # Loss info
-        loss, accuracy, ntokens = self.__get_loss(y, y_len, logits)
+        loss, accuracy, ntokens = self.__get_loss(y[:,1:], y_len - 1, logits)
 
         # Gradient
         grad_vars = self.optimizer.compute_gradients(loss, var_list=self.train_vars)
@@ -92,8 +94,8 @@ class Train:
 
     def __get_dev_info(self, inputs):
         (x, x_len), (y, y_len) = inputs
-        logits = self.model.get_logits(x, y, x_len, y_len, False)
-        loss, accuracy, ntokens = self.__get_loss(y, y_len, logits)
+        logits = self.model.get_logits(x, y[:-1], x_len, y_len - 1, training=False)
+        loss, accuracy, ntokens = self.__get_loss(y[:, 1:], y_len - 1, logits)
         return {'loss': loss, 'accuracy': accuracy}, ntokens
 
         

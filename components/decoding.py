@@ -28,9 +28,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
         maxlens: The maximum length sequences can be. [batch_size]
         eos_id: EOS token ID.
         pad_id: PAD token ID which defaults to 0
-        sos_id: Start of sequence ID. It's not necessary when `init_seq` is specified.
         alpha: Parameter for length normalization (length penalty)
-        init_seq: If None, SOS is used as the first inputs to decoder. Its shape must be [batch_size, 1]
         sampling_method: KEY_TOPK or KEY_SAMPLING. The former is the
             normal beam search. The latter samples the next token from the categorical
             distribution, in which case the specified `beam_size` is ignored and the beam
@@ -334,10 +332,10 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
             # Sort sequences
             seq = tf.batch_gather(finish_state['generated_seq'], indices)
 
-        # concat with the prefix and remove the first token (usually <SOS>)
+        # concat with the prefix
         # [batch_size, beam_size, length]
         with tf.name_scope('concat_prefix'):
-            seq = tf.concat([common_prefix, seq], axis=-1)[:, :, 1:]
+            seq = tf.concat([common_prefix, seq], axis=-1)
 
     return seq, score
 

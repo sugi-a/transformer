@@ -79,14 +79,17 @@ class Inference(MTInference):
 
     def fn_perplexity(self, inputs):
         (x, x_len) = inputs
-        logits = self.model.get_logits(x, training=False)
-        is_target = tf.sequence_mask(x_len, tf.shape(x)[1], dtype=tf.float32)
+        x_in, x_out = x[:, :-1], x[:, 1:]
+        io_len = x_len - 1
+
+        logits = self.model.get_logits(x_in, training=False)
+        is_target = tf.sequence_mask(io_len, tf.shape(x_in)[1], dtype=tf.float32)
 
         log_prob_dist = tf.math.log_softmax(logits, axis=-1) # [batch, length, vocab]
-        log_prob = tf.batch_gather(log_prob_dist, x[:, :, None]) # [batch, length, 1]
+        log_prob = tf.batch_gather(log_prob_dist, x_out[:, :, None]) # [batch, length, 1]
         log_prob = log_prob[:, :, 0]
         seq_log_prob = tf.reduce_sum(log_prob * is_target, axis=1) #[batch]
-        perp = tf.exp(-seq_log_prob / tf.cast(x_len, tf.float32))
+        perp = tf.exp(-seq_log_prob / tf.cast(io_len, tf.float32))
 
         return [perp]
 

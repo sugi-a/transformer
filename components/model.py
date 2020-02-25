@@ -561,42 +561,31 @@ class Transformer(tf.layers.Layer):
             offsets=cache.get('offsets', None))
 
 
-    def get_logits(self, x, y, x_len, y_len, training=False, shift_dec_inputs=True, offsets=None):
+    def get_logits(self, x, y, x_len, y_len, training=False, offsets=None):
         """Compute logits given inputs for encoder and decoder.
         Args:
             x: inputs for encoder with shape [batch_size, length_enc]
             y: inputs for decoder with shape [batch_size, length_dec]
-                `y` is shifted to the right by one step and SOS is added to the beginning
-                and the last token is removed. So, `y` should not contain SOS
             x_len: lengths of x with shape [batch_size]
             y_len: lengths of y
-            shift_dec_inputs: If true, <SOS> is added to the beginning of each sequence. This argument must be False if `offsets` is not None
             offsets: [batch_size] indicating the offsets of the sequences.
 
         Returns:
             """
         assert self.built
-        assert not (offsets and shift_dec_inputs)
-
-        # add SOS to the beginning and remove the last token
-        if shift_dec_inputs:
-            dec_inputs = tf.concat(
-                [tf.fill([tf.shape(y)[0], 1], self.params["vocab"]["SOS_ID"]), y[:, :-1]],
-                axis=1)
 
         cache = self.make_cache(x, x_len, training, layer_cache=False, offsets=offsets)
 
         return self.get_logits_w_cache(dec_inputs, cache, training=training)
 
 
-    def decode(self, x, x_len, beam_size=8, return_search_results=False, init_y=None, init_y_len=None, decode_config=None):
+    def decode(self, x, x_len, init_y, init_y_len, beam_size=8, return_search_results=False, decode_config=None):
         """Given inputs x, this method produces translation candidates by beam search
         and return the all results if `return_search_results` is True, or the sequence with the MAP otherwise.
         Args:
             x: Source sequence. tf.int32 Tensor of shape [batch, length]
             x_len: lengths of x. tf.int32, [batch]
             return_search_results: Boolean indicating whether to return the whole results or the MAP only.
-            init_target_seq: target-side prefix sequence
         Returns:
             If `return_search_results` is True, a tuple of Tensor, ([batch, beam_size, length],
             [batch, beam_size]) is returned. Otherwise a Tensor [batch, length] is returned."""
@@ -606,22 +595,14 @@ class Transformer(tf.layers.Layer):
         with tf.name_scope('init_cache'):
             cache = self.make_cache(x, x_len, training=False, layer_cache=True)
 
-        # Initial sequence
-        with tf.name_scope('define_init_sequence'):
-            init_seq = tf.fill([tf.shape(x)[0], 1], self.params["vocab"]["SOS_ID"])
-            if init_y is not None:
-                # Remove the last token since it's EOS
-                init_seq = tf.concat([init_seq, init_y], axis=1)[:, :-1]
-                init_seq_len = init_y_len
-
         # Maximum target length
         maxlens = tf.minimum(self.params['network']['max_length'] - 10, x_len * 3 + 10)
 
         hypos, scores = beam_search_decode(
             self.get_logits_w_cache,
             cache,
-            init_seq,
-            init_seq_len,
+            init_y,
+            init_y_len,
             beam_size,
             maxlens,
             self.params["vocab"]["EOS_ID"],
@@ -636,23 +617,14 @@ class Transformer(tf.layers.Layer):
             return top_seqs
 
 
-    def decode_V2(self, x, x_len, beam_size=8, return_search_results=False, init_y=None, init_y_len=None, decode_config=None):
+    def decode_V2(self, x, x_len, init_y, init_y_len, beam_size=8, return_search_results=False, decode_config=None):
         """`init_y` MUST have <eos> tokens at the tail,
             which are removed at the start of decoding."""
         assert self.built
 
-        if init_y is None:
-            init_y = tf.fill([tf.shape(x)[0], 1], self.params["vocab"]["SOS_ID"])
-            cache = self.make_cache(x, x_len, training=False, layer_cache=True)
-            offsets = None
-        else:
-            # Shift 1 to the right. Shape remains to be [batch, length]
-            init_y = tf.concat(
-                [tf.fill([tf.shape(x)[0], 1], self.params["vocab"]["SOS_ID"]), init_y[:, :-1]], axis=1)
-
-            # Align to the right [batch, len]
-            init_y, offsets = align_to_right(init_y, init_y_len, self.params["vocab"]["PAD_ID"])
-            cache = self.make_cache(x, x_len, training=False, layer_cache=True, offsets=offsets)
+        # Align to the right [batch, len]
+        init_y, offsets = align_to_right(init_y, init_y_len, self.params["vocab"]["PAD_ID"])
+        cache = self.make_cache(x, x_len, training=False, layer_cache=True, offsets=offsets)
 
         # Maximum target length
         maxlens = tf.minimum(self.params['network']['max_length'] - 10, x_len * 3 + 10)
@@ -669,16 +641,12 @@ class Transformer(tf.layers.Layer):
             params=decode_config or self.params['test']['decode_config'])
 
         # Remove offsets
-        if offsets is not None:
-            hypos = tf.reshape(
-                remove_offsets(
-                    tf.reshape(hypos, [tf.shape(hypos)[0], -1]),
-                    offsets,
-                    self.params['vocab']['PAD_ID']),
-                tf.shape(hypos))
-
-        # Remove offsets and remove SOS
-        hypos = hypos[:,:, 1:]
+        hypos = tf.reshape(
+            remove_offsets(
+                tf.reshape(hypos, [tf.shape(hypos)[0], -1]),
+                offsets,
+                self.params['vocab']['PAD_ID']),
+            tf.shape(hypos))
 
         if return_search_results:
             return hypos, scores

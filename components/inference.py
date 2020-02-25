@@ -162,30 +162,36 @@ class Inference:
 
     def fn_perplexity(self, inputs):
         (x, x_len), (y, y_len) = inputs
-        logits = self.model.get_logits(x, y, x_len, y_len, False)
-        is_target = tf.sequence_mask(y_len, tf.shape(y)[1], dtype=tf.float32)
+        y_in, y_out = y[:, :-1], y[:, 1:]
+        _y_len = y_len - 1
+
+        logits = self.model.get_logits(x, y_in, x_len, _y_len, False)
+        is_target = tf.sequence_mask(_y_len, tf.shape(y_in)[1], dtype=tf.float32)
 
         log_prob_dist = tf.math.log_softmax(logits, axis=-1) # [batch, length, vocab]
-        log_prob = tf.batch_gather(log_prob_dist, y[:, :, None]) # [batch, length, 1]
+        log_prob = tf.batch_gather(log_prob_dist, y_out[:, :, None]) # [batch, length, 1]
         log_prob = log_prob[:, :, 0]
         seq_log_prob = tf.reduce_sum(log_prob * is_target, axis=1) #[batch]
-        perp = tf.exp(-seq_log_prob / tf.cast(y_len, tf.float32))
+        perp = tf.exp(-seq_log_prob / tf.cast(_y_len, tf.float32))
 
         return [perp]
 
 
     def fn_translation_score(self, inputs):
         (x, x_len), (y, y_len) = inputs
-        logits = self.model.get_logits(x, y, x_len, y_len, False)
-        is_target = tf.sequence_mask(y_len, tf.shape(y)[1], dtype=tf.float32)
+        y_in, y_out = y[:, :-1], y[:, 1:]
+        _y_len = y_len - 1
+
+        logits = self.model.get_logits(x, y_in, x_len, _y_len, False)
+        is_target = tf.sequence_mask(_y_len, tf.shape(y_in)[1], dtype=tf.float32)
 
         log_prob_dist = tf.math.log_softmax(logits, axis=-1) # [batch, length, vocab]
-        log_prob = tf.batch_gather(log_prob_dist, y[:, :, None]) # [batch, length, 1]
+        log_prob = tf.batch_gather(log_prob_dist, y_out[:, :, None]) # [batch, length, 1]
         log_prob = log_prob[:, :, 0]
         seq_log_prob = tf.reduce_sum(log_prob * is_target, axis=1) #[batch]
 
         # penalty coefficient (defined in model.py)
-        penalty = length_penalty(y_len, self.ph_length_penalty)
+        penalty = length_penalty(_y_len, self.ph_length_penalty)
 
         score = seq_log_prob / penalty 
         
@@ -273,10 +279,11 @@ class Inference:
         return list(self.make_batches_iter(*args, **kwargs))
 
 
-    def make_batches_iter(self, x, y, batch_capacity=None, x_put_eos=True, y_put_eos=True):
+    def make_batches_iter(self, x, y, batch_capacity=None,
+        x_put_eos=True, y_put_eos=True, x_put_sos=False, y_put_sos=True):
         batch_capacity = batch_capacity or (self.batch_capacity * 5)
-        x_IDs = dp.gen_line2IDs(x, self.src_vocab, put_eos=x_put_eos)
-        y_IDs = dp.gen_line2IDs(y, self.vocab, put_eos=y_put_eos)
+        x_IDs = dp.gen_line2IDs(x, self.src_vocab, put_eos=x_put_eos, put_sos=x_put_sos)
+        y_IDs = dp.gen_line2IDs(y, self.vocab, put_eos=y_put_eos, put_sos=y_put_sos)
         return dp.gen_dual_const_capacity_batch(zip(x_IDs, y_IDs), batch_capacity, self.vocab.PAD_ID)
 
 
@@ -310,7 +317,7 @@ class Inference:
         if init_y_texts is None:
             init_y_texts = [''] * len(texts)
 
-        batches = self.make_batches(texts, init_y_texts, batch_capacity)
+        batches = self.make_batches(texts, init_y_texts, batch_capacity, y_put_eos=False)
         candidates, scores = self.execute_op(self.op_beam_hypos_scores, batches, {self.ph_beam_size: beam_size})
 
 

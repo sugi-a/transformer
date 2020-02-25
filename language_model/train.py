@@ -73,12 +73,14 @@ class Train:
 
     def __get_train_info(self, inputs):
         (x, x_len) = inputs
+        x_in, x_out = x[:, :-1], x[:, 1:]
+        io_len = x_len - 1
 
         # Logits [BATCH_SIZE, MAXLEN, NVOCAB]
-        logits = self.model.get_logits(x, True)
+        logits = self.model.get_logits(x_in, True)
 
         # Loss info
-        loss, accuracy, ntokens = self.__get_loss(x, x_len, logits)
+        loss, accuracy, ntokens = self.__get_loss(x_out, io_len, logits)
 
         # Gradient
         grad_vars = self.optimizer.compute_gradients(loss, var_list=self.train_vars)
@@ -89,8 +91,11 @@ class Train:
 
     def __get_dev_info(self, inputs):
         (x, x_len) = inputs
-        logits = self.model.get_logits(x, False)
-        loss, accuracy, ntokens = self.__get_loss(x, x_len, logits)
+        x_in, x_out = x[:, :-1], x[:, 1:]
+        io_len = x_len - 1
+
+        logits = self.model.get_logits(x_in, False)
+        loss, accuracy, ntokens = self.__get_loss(x_out, io_len, logits)
         return {'loss': loss, 'accuracy': accuracy}, ntokens
 
         
