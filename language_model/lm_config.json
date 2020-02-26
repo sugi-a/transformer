@@ -6,7 +6,7 @@
             "config": {
                 "window_size": 512,
                 "batch_size": 64,
-                "keep_remainder_larger_equal": 50,
+                "keep_remainder_larger_equal": 10,
                 "shuffle_buf_size": 100000
             }
         },
@@ -31,12 +31,12 @@
     "test": {
     },
     "network": {
-        "max_length": 512,
+        "max_length": 1024,
         "n_blocks": 12,
-        "n_heads": 8,
-        "attention_size": 512,
-        "embed_size": 512,
-        "ff_size": 2048,
+        "n_heads": 12,
+        "attention_size": 768,
+        "embed_size": 768,
+        "ff_size": 3072,
         "dropout_rate": 0.1,
         "pos_encoding": false,
         "pos_embedding": false,
@@ -50,7 +50,11 @@
         "EOS_ID": 2,
         "UNK_ID": 3,
         "vocab_size": 16000,
-        "dict": ""
+        "dict": "",
+        "doc_header": null,
+        "doc_footer": null,
+        "sent_header": 1,
+        "sent_footer": 2
     }
     
 }

@@ -122,6 +122,7 @@ class Train:
 
         return False
 
+
     def train(self):
         logger.info('Transformer training.')
         
@@ -139,13 +140,17 @@ class Train:
             bconf = params['train']['batch']['config']
 
             DATASET_STATE_FILE = os.path.join(self.logdir, 'train_data_loading_state.json')
-            train_data_gen = datasetloader.RandomSlidingWindow(
+            train_data_gen = datasetloader.MultiSentenceSlidingWindowLoader(
                 params['train']['data']['train'],
                 self.vocab,
                 bconf['window_size'],
-                keep_remainder_larger_equal=bconf['keep_remainder_larger_equal'],
-                random=True,
-                state_log_file=DATASET_STATE_FILE)
+                keep_remainder_larger_equal = bconf['keep_remainder_larger_equal'],
+                random = True,
+                state_log_file = DATASET_STATE_FILE,
+                doc_header =  params['vocab']['doc_header'],
+                doc_footer =  params['vocab']['doc_footer'],
+                sent_header = params['vocab']['sent_header'],
+                sent_footer = params['vocab']['sent_footer'])
 
             train_data = tf.data.Dataset.from_generator(
                     train_data_gen,
@@ -163,12 +168,16 @@ class Train:
             assert False
 
         # dev dataset
-        dev_data_gen = datasetloader.RandomSlidingWindow(
+        dev_data_gen = datasetloader.MultiSentenceSlidingWindowLoader(
             [params['train']['data']['dev']],
             self.vocab,
             bconf['window_size'],
             keep_remainder_larger_equal=1,
-            random=False)
+            random=False,
+            doc_header  = params['vocab']['doc_header'],
+            doc_footer  = params['vocab']['doc_footer'],
+            sent_header = params['vocab']['sent_header'],
+            sent_footer = params['vocab']['sent_footer'])
 
         dev_data = tf.data.Dataset.from_generator(
                 dev_data_gen,

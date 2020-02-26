@@ -102,8 +102,13 @@ class Inference(MTInference):
     def make_batches_iter(self, x, batch_capacity=None):
         batch_capacity = batch_capacity or self.batch_capacity
 
+        IDs = dp.gen_line2IDs(x, self.vocab)
+        if self.params['vocab']['sent_header'] is not None:
+            IDs = ([self.params['vocab']['sent_header']] + ids for ids in IDs)
+        if self.params['vocab']['sent_footer'] is not None:
+            IDs = (ids + [self.params['vocab']['sent_footer']] for ids in IDs)
         return dp.gen_const_capacity_batch(
-            dp.gen_line2IDs(x, self.vocab, put_eos=False),
+            IDs
             batch_capacity,
             self.vocab.PAD_ID)
 
