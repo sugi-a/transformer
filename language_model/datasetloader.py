@@ -1,7 +1,8 @@
-import sys, random, json, random
+import sys, json, random
 from logging import getLogger; logger = getLogger(__name__)
 from collections import deque
 
+from ..components.dataprocessing import gen_json_resumable
 
 class RandomSlidingWindow:
     def __init__(self, files, vocab, window_size, keep_remainder_larger_equal=None, random=True, state_log_file=None):
@@ -120,3 +121,62 @@ class RandomSlidingWindow:
         # Reset state
         self.state['shuffled_files'] = None
         self.state['data_count'] = None
+
+
+class MultiSentenceSlidingWindowLoader:
+    def __init__(self, files, vocab, window_size, keep_remainder_larger_equal=None,
+        random=True, state_log_file=None,
+        doc_header=None, doc_footer=None, sent_header=None, sent_footer=None):
+
+        self.files = files
+        self.vocab = vocab
+        self.window_size = window_size
+        self.keep_rem_le = keep_remainder_larger_equal
+        self.random = random
+        self.state_log_file = state_log_file
+        self.doc_header = doc_header
+        self.doc_footer = doc_footer
+        self.sent_header = sent_header
+        self.sent_footer = sent_footer
+
+    def __call__(self):
+        return self.gen()
+
+
+    def gen(self):
+        files = random.sample(self.files)
+        if self.state_log_file:
+            files = gen_json_resumable(files, self.state_log_file)
+        for fn in files:
+            with open(fn) as f:
+                q = deque()
+                win_size = random.randint(1, self.window_size) if self.random else self.window_size
+                for line in f:
+                    # Check the document boundaries
+                    if len(line) == 1:
+                        if self.doc_footer is not None:
+                            q.append(self.doc_footer)
+                        popped = list(q)
+                        q.clear()
+                        if len(popped) >= self.keep_rem_le:
+                            yield popped
+                    else:
+                        if len(q) == 0 and self.doc_header is not None:
+                            q.append(self.doc_header)
+                        if self.sent_header is not None:
+                            q.append(self.sent_header)
+                        q.extend(self.vocab.line2IDs(line, False, False))
+                        if self.sent_footer is not None:
+                            q.append(self.sent_footer)
+
+                        while len(q) >= self.window_size:
+                            popped = [q.popleft() for i in range(win_size)]
+                            if len(popped) >= self.keep_rem_le:
+                                yield popped
+                            win_size = self.window_size
+
+                # Yield the remainder
+                popped = list(q)
+                if len(popped) >= self.keep_rem_le:
+                    yield popped
+

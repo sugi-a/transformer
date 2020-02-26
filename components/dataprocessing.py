@@ -243,3 +243,36 @@ class CallGenWrapper:
     @classmethod
     def zip(cls, *wrappers):
         return cls(lambda: zip(*(wrapper() for wrapper in wrappers)))
+
+
+def gen_json_resumable(obj_list, state_file, allow_sorting_match=True):
+    """Placed in a pipeline, this generator behave like a checkpoint.
+    Args:
+        obj_list: list of objects which can be converted into json
+        """
+    
+    try:
+        with open(state_file) as f:
+            state = json.load(f)
+
+        if (allow_sorting_match and sorted(obj_list) != sorted(state['obj_list'])) or \
+            (not allow_sorting_match and obj_list != state['obj_list']):
+            raise Exception('Specified object list differs from the saved one.')
+
+        if state['current'] < len(state['obj_list']):
+            state = None
+    except FileNotFoundError:
+        state = None
+
+    if state is None:
+        state = {'obj_list': obj_list, 'current': 0}
+        with open(state_file, 'w') as f:
+            json.dump(state, f, indent=4)
+
+    while state['current'] < len(state['obj_list']):
+        yield state['obj_list'][state['current']]
+        
+        state['current'] += 1
+        with open(state_file, 'w') as f:
+            json.dump(state, f, indent=4)
+
