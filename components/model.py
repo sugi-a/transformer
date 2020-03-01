@@ -576,7 +576,7 @@ class Transformer(tf.layers.Layer):
 
         cache = self.make_cache(x, x_len, training, layer_cache=False, offsets=offsets)
 
-        return self.get_logits_w_cache(dec_inputs, cache, training=training)
+        return self.get_logits_w_cache(y, cache, training=training)
 
 
     def decode(self, x, x_len, init_y, init_y_len, beam_size=8, return_search_results=False, decode_config=None):

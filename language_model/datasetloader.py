@@ -86,7 +86,7 @@ class RandomSlidingWindow:
                                 self.state['data_count'] += 1
                             #######################
                     else:
-                        q.extend(self.vocab.line2IDs(line, False))
+                        q.extend(self.vocab.line2IDs(line, put_sos=True, put_eos=False))
 
                         while len(q) >= self.window_size:
                             popped = [q.popleft() for i in range(win_size)]
@@ -144,10 +144,11 @@ class MultiSentenceSlidingWindowLoader:
 
 
     def gen(self):
-        files = random.sample(self.files)
+        files = random.sample(self.files, len(self.files))
         if self.state_log_file:
             files = gen_json_resumable(files, self.state_log_file)
         for fn in files:
+            logger.debug('Opening file {}'.format(fn))
             with open(fn) as f:
                 q = deque()
                 win_size = random.randint(1, self.window_size) if self.random else self.window_size

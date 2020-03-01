@@ -5,17 +5,8 @@
             "fixed_capacity": true,
             "size": 64,
             "capacity": 8192,
-            "length_smoothing_sort": true,
-            "lss_buffer_size": 20000,
-            "batch_shuffle_buffer_size": 2000,
-            "shuffle_buffer_size": 200000,
-            "//": [
-                "If `fixed_capacity` is true, batch size is variable. So `size` is ignored",
-                "If not `fixed_capacity`, `capacity` is ignored",
-                "`length_smoothing_sort` can be true only if `fixed_capacity` is true.",
-                "If `length_smoothing_sort` is true, data is shuffled at batch-level but not sample-level.",
-                "`batch_shuffle_buffer_size` and `lss_buffer_size` are used only if `length_smoothing_sort` is true."
-            ]
+            "length_smoothing": 10000,
+            "shuffle_buffer_size": 200000
         },
         "warm_up_step": 4000,
         "label_smoothing": 0.1,
@@ -65,7 +56,9 @@
         "UNK_ID": 3,
         "vocab_size": 16000,
         "source_dict": "",
-        "target_dict": ""
+        "target_dict": "",
+        "source_sos": true,
+        "source_eos": true
     }
     
 }

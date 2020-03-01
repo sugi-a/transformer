@@ -1,0 +1,25 @@
+./components/dataprocessing.py:29:    def line2IDs(self, line, put_eos=True, put_sos=False):
+./components/dataprocessing.py:34:        return [self.line2IDs(line, put_eos, put_sos) for line in text]
+./components/dataprocessing.py:46:def gen_line2IDs(line_iter, vocab, put_eos=True, put_sos=False):
+./components/dataprocessing.py:48:        yield vocab.line2IDs(line, put_eos=put_eos, put_sos=put_sos)
+Binary file ./components/__pycache__/train.cpython-36.pyc matches
+Binary file ./components/__pycache__/inference.cpython-36.pyc matches
+Binary file ./components/__pycache__/dataprocessing.cpython-36.pyc matches
+./components/inference.py:285:        x_IDs = dp.gen_line2IDs(x, self.src_vocab, put_eos=x_put_eos, put_sos=x_put_sos)
+./components/inference.py:286:        y_IDs = dp.gen_line2IDs(y, self.vocab, put_eos=y_put_eos, put_sos=y_put_sos)
+./components/train.py:154:                self.source_vocab.line2IDs(x[0], True, True),
+./components/train.py:155:                self.target_vocab.line2IDs(x[1], True, True))
+./components/train.py:220:            ).map(dp.gen_line2IDs, self.source_vocab)
+./components/train.py:222:            ).map(dp.gen_line2IDs, self.target_vocab)
+./language_model/datasetloader.py:89:                        q.extend(self.vocab.line2IDs(line, False))
+./language_model/datasetloader.py:169:                        q.extend(self.vocab.line2IDs(line, False, False))
+Binary file ./language_model/__pycache__/datasetloader.cpython-36.pyc matches
+./language_model/inference.py:105:        IDs = dp.gen_line2IDs(x, self.vocab, False, False)
+./extras/advanced_decoding.py:65:        #x_IDs = dp.gen_line2IDs(x, self.src_vocab)
+./extras/advanced_decoding.py:66:        #y_IDs = dp.gen_line2IDs(ctx, self.vocab)
+./extras/advanced_decoding.py:320:        x = dp.gen_line2IDs(x, self.src_vocab, put_eos=True)
+./extras/advanced_decoding.py:321:        y,c = (dp.gen_line2IDs(_, self.vocab, put_eos=True) for _ in (y, c))
+./extras/advanced_decoding.py:328:        x = dp.gen_line2IDs(x, self.src_vocab, put_eos=True)
+./extras/advanced_decoding.py:329:        y,c = (dp.gen_line2IDs(_, self.vocab, put_eos=True) for _ in (y, c))
+./extras/advanced_decoding.py:341:        c = dp.gen_line2IDs(c, self.vocab, put_eos=True)
+./extras/advanced_decoding.py:342:        y = dp.gen_line2IDs(y, self.vocab, put_eos=False)

@@ -99,18 +99,41 @@ class Inference(MTInference):
                     self.ph_dict['x_len']: batch[1]}
 
 
-    def make_batches_iter(self, x, batch_capacity=None):
+    def make_batches_iter(self, x, batch_capacity=None, header=True, footer=True):
         batch_capacity = batch_capacity or self.batch_capacity
 
-        IDs = dp.gen_line2IDs(x, self.vocab)
-        if self.params['vocab']['sent_header'] is not None:
-            IDs = ([self.params['vocab']['sent_header']] + ids for ids in IDs)
-        if self.params['vocab']['sent_footer'] is not None:
-            IDs = (ids + [self.params['vocab']['sent_footer']] for ids in IDs)
+        IDs = dp.gen_line2IDs(x, self.vocab, False, False)
+        _header = self.params['vocab']['sent_header']
+        _footer = self.params['vocab']['sent_footer']
+        if header and _header is not None:
+            IDs = ([_header] + ids for ids in IDs)
+        if footer and _footer is not None:
+            IDs = (ids + [_footer] for ids in IDs)
         return dp.gen_const_capacity_batch(
             IDs
             batch_capacity,
             self.vocab.PAD_ID)
+
+
+    def make_multi_sentence_batch_gen(self, x, batch_capacity=None):
+        """
+        x: [(line1-1, line1-2, ..), (line2-1, line2-2, ...), ...]
+            """
+        batch_capacity = batch_capacity or self.batch_capacity
+        header = self.params['vocab']['sent_header']
+        footer = self.params['vocab']['sent_footer']
+        def __concat(x):
+            ret = []
+            for line in x:
+                if header is not None:
+                    ret.append(header)
+                ret.extend(self.vocab.line2IDs(line, False, False))
+                if footer is not None:
+                    ret.append(footer)
+            yield ret
+        IDs = map(__concat, x)
+        return dp.gen_const_capacity_batch(IDs, batch_capacity, self.vocab.PAD_ID)
+
 
 
     def calculate_sentence_perplexity(self, x):

@@ -8,7 +8,7 @@ import numpy as np
 from . import datasetloader
 from .language_model import DecoderLanguageModel, load_model_config
 from ..components.utils import *
-from ..components import dataprocessing
+from ..components import dataprocessing as dp
 from ..components.model import label_smoothing
 
 class Train:
@@ -34,6 +34,12 @@ class Train:
         with open(self.logdir + '/config.json', 'w') as f:
             json.dump(self.params, f, ensure_ascii=False, indent=4)
 
+
+        self.vocab = dp.Vocabulary(
+            self.params['vocab']['dict'],
+            PAD_ID=self.params['vocab']['PAD_ID'],
+            EOS_ID=self.params['vocab']['EOS_ID'],
+            UNK_ID=self.params['vocab']['UNK_ID'])
 
     def __get_loss(self, x, x_len, dec_outputs):
         """
@@ -123,36 +129,28 @@ class Train:
         return False
 
 
-    def train(self):
-        logger.info('Transformer training.')
-        
-        np.random.seed(0)
+    def make_train_dataset(self):
         params = self.params
+        bconf = params['train']['batch']
 
-        # train dataset
-        self.vocab = dataprocessing.Vocabulary(
-            params['vocab']['dict'],
-            PAD_ID=params['vocab']['PAD_ID'],
-            EOS_ID=params['vocab']['EOS_ID'],
-            UNK_ID=params['vocab']['UNK_ID'])
-
-        if params['train']['batch']['mode'] == 'random_sliding_window':
-            bconf = params['train']['batch']['config']
-
+        if bconf['sampling']['mode'] == 'random_sliding_window':
             DATASET_STATE_FILE = os.path.join(self.logdir, 'train_data_loading_state.json')
             train_data_gen = datasetloader.MultiSentenceSlidingWindowLoader(
                 params['train']['data']['train'],
                 self.vocab,
-                bconf['window_size'],
-                keep_remainder_larger_equal = bconf['keep_remainder_larger_equal'],
+                bconf['sampling']['window_size'],
+                keep_remainder_larger_equal = bconf['sampling']['keep_remainder_larger_equal'],
                 random = True,
                 state_log_file = DATASET_STATE_FILE,
                 doc_header =  params['vocab']['doc_header'],
                 doc_footer =  params['vocab']['doc_footer'],
                 sent_header = params['vocab']['sent_header'],
                 sent_footer = params['vocab']['sent_footer'])
+        else:
+            assert False
 
-            train_data = tf.data.Dataset.from_generator(
+        if bconf['batching']['mode'] == 'fixed_length':
+            dataset = tf.data.Dataset.from_generator(
                     train_data_gen,
                     tf.int32,
                     tf.TensorShape([None])) \
@@ -163,33 +161,115 @@ class Train:
                     (tf.TensorShape([bconf['window_size']]), tf.TensorShape([])),
                     (params['vocab']['PAD_ID'], 0),
                     False) \
-                .prefetch(2 * self.n_gpus)
+                .prefetch(self.n_gpus + 2)
+        elif bconf['batching']['mode'] == 'fixed_capacity':
+            gen = dp.CallGenWrapper(train_data_gen
+                ).map(dp.gen_random_sample, bconf['shuffle_buf_size'])
+            if bconf['batching'].get('length_smoothing', None) is not None:
+                if bconf['batching']['length_smoothing']['mode'] == 'segment_sort':
+                    gen = gen.map(
+                        dp.gen_segment_sort,
+                        segsize = bconf['batching']['length_smoothing']['segsize'],
+                        key = lambda x:len(x))
+                else:
+                    assert False
+            gen = gen.map(
+                dp.gen_const_capacity_batch,
+                capacity = bconf['batching']['capacity'] // self.n_gpus,
+                PAD_ID = params['vocab']['PAD_ID'])
+
+            dataset = tf.data.Dataset.from_generator(
+                    gen,
+                    (tf.int32, tf.int32),
+                    (tf.TensorShape([None, None]), tf.TensorShape([None]))
+                ).prefetch(self.n_gpus + 2)
+
+        return dataset
+
+
+    def make_dev_dataset(self):
+        params = self.params
+        bconf = params['train']['batch']
+
+        if bconf['sampling']['mode'] == 'random_sliding_window':
+            sent_gen = datasetloader.MultiSentenceSlidingWindowLoader(
+                [params['train']['data']['dev']],
+                self.vocab,
+                bconf['sampling']['window_size'],
+                keep_remainder_larger_equal=1,
+                random=False,
+                doc_header  = params['vocab']['doc_header'],
+                doc_footer  = params['vocab']['doc_footer'],
+                sent_header = params['vocab']['sent_header'],
+                sent_footer = params['vocab']['sent_footer'])
         else:
             assert False
+        
+
+        if bconf['batching']['mode'] == 'fixed_length':
+            dataset = tf.data.Dataset.from_generator(
+                    sent_gen,
+                    tf.int32,
+                    tf.TensorShape([None])
+                ).map(lambda x: (x, tf.shape(x)[0])
+                ).padded_batch(
+                    bconf['batch_size'] // self.n_gpus,
+                    (tf.TensorShape([None]), tf.TensorShape([])),
+                    (params['vocab']['PAD_ID'], 0),
+                    False
+                ).prefetch(self.n_gpus + 2)
+        elif bconf['batching']['mode'] == 'fixed_capacity':
+            gen = dp.CallGenWrapper(sent_gen
+                ).map(
+                dp.gen_const_capacity_batch,
+                capacity = bconf['batching']['capacity'] // self.n_gpus,
+                PAD_ID = params['vocab']['PAD_ID'])
+
+            dataset = tf.data.Dataset.from_generator(
+                    gen,
+                    (tf.int32, tf.int32),
+                    (tf.TensorShape([None, None]), tf.TensorShape([None]))
+                ).prefetch(self.n_gpus + 2)
+
+        return dataset
+
+
+    def check_train_data(self, n_gpus=None):
+        if n_gpus is None:
+            n_gpus = self.n_gpus
+
+        train_data = self.make_train_dataset()
+        train_iterator = train_data.make_initializable_iterator()
+        fetch = [train_iterator.get_next() for i in range(n_gpus)]
+        step = 0
+        with tf.Session() as sess:
+            sess.run(train_iterator.initializer)
+            start_time = time.time()
+            sys.stderr.write('Start\n')
+            while True:
+                try:
+                    sess.run(fetch)
+                    step += 1
+                    if step % 100 == 0:
+                        sys.stderr.write('Step:{:10}\tSec/step: {:10.4f}\r'
+                            .format(step, (time.time() - start_time)/step))
+                except tf.errors.OutOfRangeError:
+                    break
+        sys.stderr.write('Done\Step:{:10}\tSec/step: {:10.4f}\n'
+            .format(step, (time.time() - start_time) / step))
+
+
+    def train(self):
+        logger.info('Transformer training.')
+        
+        np.random.seed(0)
+        params = self.params
+
+        # train dataset
+        train_data = self.make_train_dataset()
 
         # dev dataset
-        dev_data_gen = datasetloader.MultiSentenceSlidingWindowLoader(
-            [params['train']['data']['dev']],
-            self.vocab,
-            bconf['window_size'],
-            keep_remainder_larger_equal=1,
-            random=False,
-            doc_header  = params['vocab']['doc_header'],
-            doc_footer  = params['vocab']['doc_footer'],
-            sent_header = params['vocab']['sent_header'],
-            sent_footer = params['vocab']['sent_footer'])
-
-        dev_data = tf.data.Dataset.from_generator(
-                dev_data_gen,
-                tf.int32,
-                tf.TensorShape([None])) \
-            .map(lambda x: (x, tf.shape(x)[0])) \
-            .padded_batch(
-                bconf['batch_size'] // self.n_gpus,
-                (tf.TensorShape([None]), tf.TensorShape([])),
-                (params['vocab']['PAD_ID'], 0),
-                False) \
-            .prefetch(2 * self.n_gpus)
+        dev_data = self.make_dev_dataset()
 
         # train/dev iterators and input tensors
         train_iterator = train_data.make_initializable_iterator()
@@ -248,7 +328,7 @@ class Train:
             if not os.path.exists(p):
                 os.mkdir(p)
 
-        summary_writer = tf.summary.FileWriter(summary_dir, tf.get_default_graph())
+        summary_writer = tf.summary.FileWriter(summary_dir)
         
         train_summary_op = tf.summary.merge([
             tf.summary.scalar('accuracy', train_info['accuracy']),
@@ -324,6 +404,7 @@ class Train:
 
                         # validation
                         # negative loss on development data as score
+                        logger.debug('Start validation.')
                         sess.run(dev_info_avg.init_op)
                         sess.run(dev_iterator.initializer)
                         while True:
@@ -332,6 +413,7 @@ class Train:
                             except tf.errors.OutOfRangeError:
                                 break
                         score = - sess.run(dev_info_avg.average['loss'])
+                        logger.debug('Finished validation.')
 
                         # update max score
                         if self.metric_score.update(score, global_step, epoch):
@@ -349,7 +431,6 @@ class Train:
                         if _should_stop: break
 
                     try:
-
 
                         if global_step % 1000 == 0:
                             _, train_summary, global_step = sess.run([train_info['train_op'],
@@ -452,10 +533,15 @@ def main():
     parser.add_argument('--n_gpus', default=1, type=int,
                         help='Number of GPUs available')
     parser.add_argument('--random_seed', default=0, type=int)
+    parser.add_argument('--check-train-data', action='store_true')
     args = parser.parse_args()
 
-
-    Train(args.model_dir, args.n_gpus, args.n_cpu_cores, args.random_seed).train()
+    if args.check_train_data:
+        t = Train(args.model_dir, args.n_gpus, args.n_cpu_cores, args.random_seed)
+        #t.check_train_data()
+        t.test_()
+    else:
+        Train(args.model_dir, args.n_gpus, args.n_cpu_cores, args.random_seed).train()
 
 if __name__ == '__main__':
     main()

@@ -37,6 +37,20 @@ class Train:
         with open(self.logdir + '/config.json', 'w') as f:
             json.dump(self.params, f, ensure_ascii=False, indent=4)
 
+        # Vocabulary
+        self.source_vocab = dp.Vocabulary(
+            self.params['vocab']['source_dict'],
+            PAD_ID=self.params['vocab']['PAD_ID'],
+            EOS_ID=self.params['vocab']['EOS_ID'],
+            UNK_ID=self.params['vocab']['UNK_ID'],
+            SOS_ID=self.params['vocab']['SOS_ID'])
+
+        self.target_vocab = dp.Vocabulary(
+            self.params['vocab']['target_dict'],
+            PAD_ID=self.params['vocab']['PAD_ID'],
+            EOS_ID=self.params['vocab']['EOS_ID'],
+            UNK_ID=self.params['vocab']['UNK_ID'],
+            SOS_ID=self.params['vocab']['SOS_ID'])
 
     def __get_loss(self, y, y_len, dec_outputs):
         """
@@ -94,7 +108,7 @@ class Train:
 
     def __get_dev_info(self, inputs):
         (x, x_len), (y, y_len) = inputs
-        logits = self.model.get_logits(x, y[:-1], x_len, y_len - 1, training=False)
+        logits = self.model.get_logits(x, y[:, :-1], x_len, y_len - 1, training=False)
         loss, accuracy, ntokens = self.__get_loss(y[:, 1:], y_len - 1, logits)
         return {'loss': loss, 'accuracy': accuracy}, ntokens
 
@@ -122,55 +136,47 @@ class Train:
 
         return False
 
-    def train(self):
-        logger.info('Transformer training.')
-        
-        np.random.seed(self.random_seed)
-        random.seed(self.random_seed)
-
+    
+    def make_train_data(self):
         params = self.params
-
-        # Vocabulary
-        self.source_vocab = source_vocab = dp.Vocabulary(
-            params['vocab']['source_dict'],
-            PAD_ID=params['vocab']['PAD_ID'],
-            EOS_ID=params['vocab']['EOS_ID'],
-            UNK_ID=params['vocab']['UNK_ID'])
-
-        self.target_vocab = target_vocab = dp.Vocabulary(
-            params['vocab']['target_dict'],
-            PAD_ID=params['vocab']['PAD_ID'],
-            EOS_ID=params['vocab']['EOS_ID'],
-            UNK_ID=params['vocab']['UNK_ID'])
-
-        # Train dataset
-        src_IDs = dp.CallGenWrapper(lambda: params['train']['data']['source_train']
-            ).map(dp.gen_lines_from_files).map(dp.gen_line2IDs, source_vocab)
-        trg_IDs = dp.CallGenWrapper(lambda: params['train']['data']['target_train']
-            ).map(dp.gen_lines_from_files).map(dp.gen_line2IDs, target_vocab)
-        src_trg_IDs = dp.CallGenWrapper.zip(src_IDs, trg_IDs)
+        src_trg_IDs = dp.CallGenWrapper(lambda: zip(
+            params['train']['data']['source_train'],
+            params['train']['data']['target_train'])
+        ).map(
+            dp.gen_random_sample
+        ).map(
+            dp.gen_json_resumable,
+            os.path.join(self.logdir, 'train_data_loading_state.json')
+        ).map(
+            dp.gen_lines_from_files_multi
+        ).map_element(
+            lambda x: (
+                self.source_vocab.line2IDs(
+                    x[0],
+                    put_sos = params['vocab']['source_sos'],
+                    put_eos = params['vocab']['source_eos']),
+                self.target_vocab.line2IDs(
+                    x[1],
+                    put_sos = True,
+                    put_eos = True))
+        )
 
         if params['train']['batch']['fixed_capacity']:
-            if params['train']['batch'].get('length_smoothing_sort', True):
-                src_trg_IDs = src_trg_IDs.map(
-                    dp.gen_length_smooth_sorted_seq,
-                    buffer_size=params['train']['batch']['lss_buffer_size'])
-            else:
-                src_trg_IDs = src_trg_IDs.map(
-                    dp.gen_random_sample,
-                    buffer_size=params['train']['batch']['shuffle_buffer_size'])
+            src_trg_IDs = src_trg_IDs.map(dp.gen_random_sample,
+                bufsize=params['train']['batch']['shuffle_buffer_size'])
+            if params['train']['batch'].get('length_smoothing', None) is not None:
+                src_trg_IDs = src_trg_IDs.map(dp.gen_segment_sort,
+                    segsize=params['train']['batch']['length_smoothing'],
+                    key = lambda x: len(x[0]))
             src_trg_IDs = src_trg_IDs.map(
                 dp.gen_dual_const_capacity_batch,
                 params['train']['batch']['capacity'] // self.n_gpus,
-                PAD_ID=source_vocab.PAD_ID)
+                PAD_ID=self.source_vocab.PAD_ID)
 
             train_data = tf.data.Dataset.from_generator(
                 src_trg_IDs,
                 ((tf.int32, tf.int32), (tf.int32, tf.int32)),
                 (([None, None], [None]), ([None, None], [None])))
-            if params['train']['batch'].get('length_smoothing_sort', True):
-                # Batch-level shuffle
-                train_data = train_data.shuffle(params['train']['batch']['batch_shuffle_buffer_size'])
             train_data = train_data.prefetch(self.n_gpus + 1)
         else:
             train_data = tf.data.Dataset.from_generator(
@@ -182,14 +188,55 @@ class Train:
                 ).padded_batch(
                     params["train"]["batch"]["size"] // self.n_gpus,
                     (([None], []), ([None], [])),
-                    ((source_vocab.PAD_ID, 0), (source_vocab.PAD_ID, 0))
+                    ((self.source_vocab.PAD_ID, 0), (self.target_vocab.PAD_ID, 0))
                 ).prefetch(self.n_gpus + 1)
 
-        # Dev dataset
-        dev_src_IDs = dp.CallGenWrapper(lambda: dp.gen_lines_from_file(params['train']['data']['source_dev'])
-            ).map(dp.gen_line2IDs, source_vocab)
-        dev_trg_IDs = dp.CallGenWrapper(lambda: dp.gen_lines_from_file(params['train']['data']['target_dev'])
-            ).map(dp.gen_line2IDs, target_vocab)
+        return train_data
+
+
+    def check_train_data(self):
+        train_data = self.make_dev_data()
+        train_iterator = train_data.make_initializable_iterator()
+        fetch = [train_iterator.get_next() for i in range(self.n_gpus)]
+        with tf.Session() as sess:
+            sess.run(train_iterator.initializer)
+            start_time = time.time()
+            step = 0
+            while True:
+                try:
+                    ret = sess.run(fetch)
+                    for (x, lx), (y, ly) in ret:
+                        print(x.shape, y.shape)
+                    if step == 1000:
+                        exit(0)
+                    #sess.run(fetch)
+                    step += 1
+                    if step % 1000 == 0:
+                        sys.stderr.write('Step: {:10}, sec/step: {:10.3f}\r'.format(step,
+                            (time.time() - start_time)/step))
+                except tf.errors.OutOfRangeError:
+                    break
+        sys.stderr.write('Finished. Step:{:10}, sec/step: {:10.3f}'.format(step,
+            (time.time() - start_time)/step))
+
+
+    def make_dev_data(self):
+        params = self.params
+        dev_src_IDs = dp.CallGenWrapper(
+            lambda: dp.gen_lines_from_file(params['train']['data']['source_dev'])
+        ).map(
+            dp.gen_line2IDs,
+            self.source_vocab,
+            put_sos = params['vocab']['source_sos'],
+            put_eos = params['vocab']['source_eos'])
+        dev_trg_IDs = dp.CallGenWrapper(
+            lambda: dp.gen_lines_from_file(params['train']['data']['target_dev'])
+        ).map(
+            dp.gen_line2IDs,
+            self.target_vocab,
+            put_sos = True,
+            put_eos = True)
+
         dev_data = tf.data.Dataset.from_generator(
             dp.CallGenWrapper.zip(dev_src_IDs, dev_trg_IDs),
             (tf.int32, tf.int32),
@@ -198,9 +245,26 @@ class Train:
             ).padded_batch(
                 params["train"]["batch"]["size"] // self.n_gpus,
                 (([None], []), ([None], [])),
-                ((source_vocab.PAD_ID, 0), (source_vocab.PAD_ID, 0))
+                ((self.source_vocab.PAD_ID, 0), (self.target_vocab.PAD_ID, 0))
             ).prefetch(self.n_gpus + 1)
-    
+        return dev_data
+
+
+    def train(self):
+        logger.info('Transformer training.')
+        
+        np.random.seed(self.random_seed)
+        random.seed(self.random_seed)
+
+        params = self.params
+        source_vocab = self.source_vocab
+        target_vocab = self.target_vocab
+
+        # Train dataset
+        train_data = self.make_train_data()
+
+        # Dev dataset
+        dev_data = self.make_dev_data() 
 
         # train/dev iterators and input tensors
         train_iterator = train_data.make_initializable_iterator()
@@ -475,10 +539,13 @@ def main():
     parser.add_argument('--n_gpus', default=1, type=int,
                         help='Number of GPUs available')
     parser.add_argument('--random_seed', default=0, type=int)
+    parser.add_argument('--check-train-data', action='store_true')
     args = parser.parse_args()
 
-
-    Train(args.model_dir, args.n_gpus, args.n_cpu_cores, args.random_seed).train()
+    if args.check_train_data:
+        Train(args.model_dir, args.n_gpus, args.n_cpu_cores, args.random_seed).check_train_data()
+    else:
+        Train(args.model_dir, args.n_gpus, args.n_cpu_cores, args.random_seed).train()
 
 if __name__ == '__main__':
     main()

@@ -2,12 +2,24 @@
     "basedir": null,
     "train": {
         "batch": {
-            "mode": "random_sliding_window",
-            "config": {
+            "sampling": {
+                "mode": "random_sliding_window",
                 "window_size": 512,
-                "batch_size": 64,
                 "keep_remainder_larger_equal": 10,
-                "shuffle_buf_size": 100000
+                "header": "<s>"
+            },
+            "shuffle_buf_size": 500000,
+            "batching":{
+                "mode": "fixed_length",
+                "size": 64
+            },
+            "//batching":{
+                "mode": "fixed_capacity",
+                "capacity": 32768,
+                "length_smoothing": {
+                    "mode": "segment_sort",
+                    "segsize": 10000
+                }
             }
         },
         "warm_up_step": 4000,
@@ -50,11 +62,7 @@
         "EOS_ID": 2,
         "UNK_ID": 3,
         "vocab_size": 16000,
-        "dict": "",
-        "doc_header": null,
-        "doc_footer": null,
-        "sent_header": 1,
-        "sent_footer": 2
+        "dict": ""
     }
     
 }

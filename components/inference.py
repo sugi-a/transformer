@@ -279,8 +279,12 @@ class Inference:
         return list(self.make_batches_iter(*args, **kwargs))
 
 
-    def make_batches_iter(self, x, y, batch_capacity=None,
-        x_put_eos=True, y_put_eos=True, x_put_sos=False, y_put_sos=True):
+    def make_batches_iter(self, x, y, x_put_sos=None, x_put_eos=None,
+        y_put_sos=True, y_put_eos=True, batch_capacity=None):
+        if x_put_sos is None:
+            x_put_sos = self.params['vocab']['source_sos']
+        if x_put_eos is None:
+            x_put_eos = self.params['vocab']['source_eos']
         batch_capacity = batch_capacity or (self.batch_capacity * 5)
         x_IDs = dp.gen_line2IDs(x, self.src_vocab, put_eos=x_put_eos, put_sos=x_put_sos)
         y_IDs = dp.gen_line2IDs(y, self.vocab, put_eos=y_put_eos, put_sos=y_put_sos)

@@ -1,4 +1,5 @@
 import sys, os, codecs, time, heapq, random, time, json
+from contextlib import ExitStack
 from collections import deque
 from logging import getLogger; logger = getLogger(__name__)
 import numpy as np
@@ -16,21 +17,21 @@ class Vocabulary:
         self.ctrls = set(other_control_symbols or []) | {PAD_ID, EOS_ID, SOS_ID}
 
 
-    def tokens2IDs(self, tokens, put_eos=True, put_sos=False):
+    def tokens2IDs(self, tokens, put_sos, put_eos):
         ret = [self.tok2ID.get(tok, self.UNK_ID) for tok in tokens]
         if put_eos:
             ret = ret + [self.EOS_ID]
         if put_sos:
-            ret = [self.SOS] + ret
+            ret = [self.SOS_ID] + ret
         return ret
 
 
-    def line2IDs(self, line, put_eos=True, put_sos=False):
-        return self.tokens2IDs(line.split(), put_eos, put_sos)
+    def line2IDs(self, line, put_sos, put_eos):
+        return self.tokens2IDs(line.split(), put_sos=put_sos, put_eos=put_eos)
 
 
-    def text2IDs(self, text, put_eos=True, put_sos=False):
-        return [self.line2IDs(line, put_eos, put_sos) for line in text]
+    def text2IDs(self, text, put_sos, put_eos):
+        return [self.line2IDs(line, put_sos=put_sos, put_eos=put_eos) for line in text]
 
 
     def IDs2text(self, IDs, skip_control_symbols=True):
@@ -42,7 +43,7 @@ class Vocabulary:
                 for id in sent) for sent in IDs]
 
 
-def gen_line2IDs(line_iter, vocab, put_eos=True, put_sos=False):
+def gen_line2IDs(line_iter, vocab, put_sos, put_eos):
     for line in line_iter:
         yield vocab.line2IDs(line, put_eos=put_eos, put_sos=put_sos)
 
@@ -188,38 +189,63 @@ def gen_length_smooth_sorted_seq(iters, buffer_size=10000, nbins=250):
     for b in bins:
         while len(b) > 0:
             yield b.pop()
-            
+
+
+def gen_random_sample(iterable, bufsize=None):
+    if bufsize is None:
+        yield from (iterable)
+    else:
+        buf = []
+        for x in iterable:
+            if len(buf) < bufsize:
+                buf.append(x)
+            else:
+                ind = random.randint(0, bufsize - 1)
+                yield buf[ind]
+                buf[ind] = x
+        
+        random.shuffle(buf)
+        yield from buf
+
+
+def gen_segment_sort(iterable, segsize=10000, key=None):
+    key = key or (lambda x:len(x[0]))
+    seg = []
+    for x in iterable:
+        seg.append(x)
+        if len(seg) >= segsize:
+            seg.sort(key=key)
+            yield from seg
+            seg.clear()
+    seg.sort()
+    yield from seg
+
             
 def gen_lines_from_files(file_names, shuffle=False):
     if shuffle:
-        file_names = np.random.permutation(file_names)
+        file_names = list(file_names)
+        yield from random.sample(file_name, len(file_names))
     for fname in file_names:
         with open(fname) as f:
             for line in f:
                 yield line
 
 
+def gen_lines_from_files_multi(multi_file_names):
+    """
+    multi_file_names: [(src_file1, trg_file1), (src_file2, trg_file2), ...]
+        """
+    for fnames in multi_file_names:
+        logger.debug('Opening files: {}'.format(', '.join(fnames)))
+        with ExitStack() as stack:
+            fps = [stack.enter_context(open(fname)) for fname in fnames]
+            yield from zip(*fps)
+
+
 def gen_lines_from_file(file_name):
     with open(file_name) as f:
         for line in f:
             yield line
-
-
-def gen_random_sample(iters, buffer_size):
-    buffer = []
-    
-    for items in iters:
-        if len(buffer) < buffer_size:
-            buffer.append(items)
-        else:
-            ind = random.randint(0, buffer_size - 1)
-            yield buffer[ind]
-            buffer[ind] = items
-    
-    for i in range(len(buffer) - 1, -1, -1):
-        ind = random.randint(0, i)
-        yield buffer[ind]
-        buffer[ind] = buffer[i]
 
 
 class CallGenWrapper:
@@ -230,7 +256,11 @@ class CallGenWrapper:
     def map(self, fn, *args, **kwargs):
         self.funcs.append((fn , args, kwargs))
         return self
-    
+
+
+    def map_element(self, fn):
+        self.funcs.append((lambda it: map(fn, it), [], {}))
+        return self 
 
     def __call__(self):
         gen = self.init_generator_fn()
@@ -245,12 +275,13 @@ class CallGenWrapper:
         return cls(lambda: zip(*(wrapper() for wrapper in wrappers)))
 
 
-def gen_json_resumable(obj_list, state_file, allow_sorting_match=True):
+def gen_json_resumable(json_iter, state_file, allow_sorting_match=True):
     """Placed in a pipeline, this generator behave like a checkpoint.
     Args:
-        obj_list: list of objects which can be converted into json
+        json_iter: list of objects which can be converted into json
         """
     
+    obj_list = json.loads(json.dumps(list(json_iter)))
     try:
         with open(state_file) as f:
             state = json.load(f)
@@ -259,7 +290,7 @@ def gen_json_resumable(obj_list, state_file, allow_sorting_match=True):
             (not allow_sorting_match and obj_list != state['obj_list']):
             raise Exception('Specified object list differs from the saved one.')
 
-        if state['current'] < len(state['obj_list']):
+        if len(state['obj_list']) <= state['current']:
             state = None
     except FileNotFoundError:
         state = None

@@ -24,12 +24,14 @@ with open(model_dir + '/' + 'lm_config.json') as f:
     params = json.load(f)
 
 # Add prefix to the dataset paths. Absolute prefix is recommended.
-if 'basedir' in params: 
-    _p = params["basedir"]
-    for i in range(len(params["train"]["data"]["train"])):
-        params["train"]["data"]["train"][i] = os.path.join(_p, params["train"]["data"]["train"][i])
-    params["train"]["data"]["dev"] = os.path.join(_p, params["train"]["data"]["dev"])
-    params["vocab"]["dict"] = os.path.join(_p, params["vocab"]["dict"])
+if params.get('basedir', None) is None:
+    params['basedir'] = model_dir
+
+_p = params["basedir"]
+for i in range(len(params["train"]["data"]["train"])):
+    params["train"]["data"]["train"][i] = os.path.join(_p, params["train"]["data"]["train"][i])
+params["train"]["data"]["dev"] = os.path.join(_p, params["train"]["data"]["dev"])
+params["vocab"]["dict"] = os.path.join(_p, params["vocab"]["dict"])
 
 
 # -------- methods --------
