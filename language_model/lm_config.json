@@ -8,7 +8,7 @@
                 "keep_remainder_larger_equal": 10,
                 "header": "<s>"
             },
-            "shuffle_buf_size": 500000,
+            "shuffle_buf_size": 100000,
             "batching":{
                 "mode": "fixed_length",
                 "size": 64

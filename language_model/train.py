@@ -142,10 +142,7 @@ class Train:
                 keep_remainder_larger_equal = bconf['sampling']['keep_remainder_larger_equal'],
                 random = True,
                 state_log_file = DATASET_STATE_FILE,
-                doc_header =  params['vocab']['doc_header'],
-                doc_footer =  params['vocab']['doc_footer'],
-                sent_header = params['vocab']['sent_header'],
-                sent_footer = params['vocab']['sent_footer'])
+                header = bconf['sampling']['header'])
         else:
             assert False
 
@@ -157,7 +154,7 @@ class Train:
                 .shuffle(bconf['shuffle_buf_size']) \
                 .map(lambda x: (x, tf.shape(x)[0])) \
                 .padded_batch(
-                    bconf['batch_size'] // self.n_gpus,
+                    bconf['batching']['size'] // self.n_gpus,
                     (tf.TensorShape([bconf['window_size']]), tf.TensorShape([])),
                     (params['vocab']['PAD_ID'], 0),
                     False) \
@@ -198,10 +195,7 @@ class Train:
                 bconf['sampling']['window_size'],
                 keep_remainder_larger_equal=1,
                 random=False,
-                doc_header  = params['vocab']['doc_header'],
-                doc_footer  = params['vocab']['doc_footer'],
-                sent_header = params['vocab']['sent_header'],
-                sent_footer = params['vocab']['sent_footer'])
+                header = bconf['sampling']['header'])
         else:
             assert False
         
@@ -213,7 +207,7 @@ class Train:
                     tf.TensorShape([None])
                 ).map(lambda x: (x, tf.shape(x)[0])
                 ).padded_batch(
-                    bconf['batch_size'] // self.n_gpus,
+                    bconf['batching']['size'] // self.n_gpus,
                     (tf.TensorShape([None]), tf.TensorShape([])),
                     (params['vocab']['PAD_ID'], 0),
                     False
@@ -221,9 +215,13 @@ class Train:
         elif bconf['batching']['mode'] == 'fixed_capacity':
             gen = dp.CallGenWrapper(sent_gen
                 ).map(
-                dp.gen_const_capacity_batch,
-                capacity = bconf['batching']['capacity'] // self.n_gpus,
-                PAD_ID = params['vocab']['PAD_ID'])
+                    dp.gen_segment_sort,
+                    segsize = 10000,
+                    key=lambda x:len(x)
+                ).map(
+                    dp.gen_const_capacity_batch,
+                    capacity = bconf['batching']['capacity'] // self.n_gpus,
+                    PAD_ID = params['vocab']['PAD_ID'])
 
             dataset = tf.data.Dataset.from_generator(
                     gen,
@@ -248,10 +246,15 @@ class Train:
             sys.stderr.write('Start\n')
             while True:
                 try:
-                    sess.run(fetch)
+                    ret = sess.run(fetch)
+                    for x, xl in ret:
+                        print(x.tolist(), xl.tolist())
+                    if step == 5:
+                        exit(0)
+                    #sess.run(fetch)
                     step += 1
-                    if step % 100 == 0:
-                        sys.stderr.write('Step:{:10}\tSec/step: {:10.4f}\r'
+                    if step % 500 == 0:
+                        sys.stderr.write('Step:{:10}\tSec/step: {:10.4f}\n'
                             .format(step, (time.time() - start_time)/step))
                 except tf.errors.OutOfRangeError:
                     break
@@ -433,9 +436,8 @@ class Train:
                     try:
 
                         if global_step % 1000 == 0:
-                            _, train_summary, global_step = sess.run([train_info['train_op'],
-                                                                    train_summary_op,
-                                                                    global_step_var])
+                            _, train_summary, global_step = sess.run(
+                                [train_info['train_op'], train_summary_op, global_step_var])
 
                             # write summary of train data
                             summary_writer.add_summary(train_summary, global_step)
@@ -538,8 +540,7 @@ def main():
 
     if args.check_train_data:
         t = Train(args.model_dir, args.n_gpus, args.n_cpu_cores, args.random_seed)
-        #t.check_train_data()
-        t.test_()
+        t.check_train_data()
     else:
         Train(args.model_dir, args.n_gpus, args.n_cpu_cores, args.random_seed).train()
 

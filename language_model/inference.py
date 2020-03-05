@@ -102,7 +102,7 @@ class Inference(MTInference):
     def make_batches_iter(self, x, batch_capacity=None, header=True, footer=True):
         batch_capacity = batch_capacity or self.batch_capacity
 
-        IDs = dp.gen_line2IDs(x, self.vocab, False, False)
+        IDs = dp.gen_line2IDs(x, self.vocab)
         _header = self.params['vocab']['sent_header']
         _footer = self.params['vocab']['sent_footer']
         if header and _header is not None:
@@ -127,7 +127,7 @@ class Inference(MTInference):
             for line in x:
                 if header is not None:
                     ret.append(header)
-                ret.extend(self.vocab.line2IDs(line, False, False))
+                ret.extend(self.vocab.line2IDs(line))
                 if footer is not None:
                     ret.append(footer)
             yield ret
