@@ -1,5 +1,6 @@
 import sys, os, codecs, time, heapq, random, time, json
 from contextlib import ExitStack
+from itertools import starmap
 from collections import deque
 from logging import getLogger; logger = getLogger(__name__)
 import numpy as np
@@ -17,21 +18,16 @@ class Vocabulary:
         self.ctrls = set(other_control_symbols or []) | {PAD_ID, EOS_ID, SOS_ID}
 
 
-    def tokens2IDs(self, tokens, put_sos, put_eos):
-        ret = [self.tok2ID.get(tok, self.UNK_ID) for tok in tokens]
-        if put_eos:
-            ret = ret + [self.EOS_ID]
-        if put_sos:
-            ret = [self.SOS_ID] + ret
-        return ret
+    def tokens2IDs(self, tokens):
+        return [self.tok2ID.get(tok, self.UNK_ID) for tok in tokens]
 
 
-    def line2IDs(self, line, put_sos, put_eos):
-        return self.tokens2IDs(line.split(), put_sos=put_sos, put_eos=put_eos)
+    def line2IDs(self, line):
+        return self.tokens2IDs(line.split())
 
 
-    def text2IDs(self, text, put_sos, put_eos):
-        return [self.line2IDs(line, put_sos=put_sos, put_eos=put_eos) for line in text]
+    def text2IDs(self, text):
+        return [self.line2IDs(line) for line in text]
 
 
     def IDs2text(self, IDs, skip_control_symbols=True):
@@ -43,9 +39,9 @@ class Vocabulary:
                 for id in sent) for sent in IDs]
 
 
-def gen_line2IDs(line_iter, vocab, put_sos, put_eos):
+def gen_line2IDs(line_iter, vocab):
     for line in line_iter:
-        yield vocab.line2IDs(line, put_eos=put_eos, put_sos=put_sos)
+        yield vocab.line2IDs(line)
 
 
 def list2numpy_nested(nested):
@@ -193,11 +189,14 @@ def gen_length_smooth_sorted_seq(iters, buffer_size=10000, nbins=250):
 
 def gen_random_sample(iterable, bufsize=None):
     if bufsize is None:
-        yield from (iterable)
+        iterable = list(iterable)
+        yield from random.sample(iterable, len(iterable))
     else:
         buf = []
         for x in iterable:
             if len(buf) < bufsize:
+                if len(buf) % 10000 == 0:
+                    logger.debug('Filling sampling buffer ({}/{})'.format(len(buf), bufsize))
                 buf.append(x)
             else:
                 ind = random.randint(0, bufsize - 1)
@@ -209,17 +208,28 @@ def gen_random_sample(iterable, bufsize=None):
 
 
 def gen_segment_sort(iterable, segsize=10000, key=None):
-    key = key or (lambda x:len(x[0]))
-    seg = []
+    i_seg = []
+    o_seg = None
     for x in iterable:
-        seg.append(x)
-        if len(seg) >= segsize:
-            seg.sort(key=key)
-            yield from seg
-            seg.clear()
-    seg.sort()
-    yield from seg
+        i_seg.append(x)
+        if len(i_seg) >= segsize:
+            i_seg.sort(key=key)
+            o_seg = iter(i_seg)
+            i_seg = []
+        if o_seg:
+            yield next(o_seg)
+    if o_seg:
+        yield from o_seg
+    i_seg.sort(key=key)
+    yield from i_seg
 
+
+def gen_integrated_dual_segsort_const_cap_batch(seqs, segsize=10000):
+    key = lambda x: len(x[0])
+    i_seg = []
+    o_seg = None
+    
+        
             
 def gen_lines_from_files(file_names, shuffle=False):
     if shuffle:
@@ -231,16 +241,19 @@ def gen_lines_from_files(file_names, shuffle=False):
                 yield line
 
 
-def gen_lines_from_files_multi(multi_file_names):
+def gen_multi_lines_from_file(*file_names):
+    logger.debug('Opening files: {}'.format(', '.join(file_names)))
+    with ExitStack() as stack:
+        fps = [stack.enter_context(open(fn)) for fn in file_names]
+        yield from zip(*fps)
+
+
+def gen_multi_lines_from_multi_files(multi_file_names):
     """
     multi_file_names: [(src_file1, trg_file1), (src_file2, trg_file2), ...]
         """
     for fnames in multi_file_names:
-        logger.debug('Opening files: {}'.format(', '.join(fnames)))
-        with ExitStack() as stack:
-            fps = [stack.enter_context(open(fname)) for fname in fnames]
-            yield from zip(*fps)
-
+        yield from gen_multi_lines_from_file(*fnames)
 
 def gen_lines_from_file(file_name):
     with open(file_name) as f:
