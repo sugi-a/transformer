@@ -148,30 +148,33 @@ class Train:
             dp.gen_json_resumable,
             os.path.join(self.logdir, 'train_data_loading_state.json')
         ).map(
-            dp.gen_lines_from_files_multi
+            dp.gen_multi_lines_from_multi_files
         ).map_element(
             lambda x: (
-                self.source_vocab.line2IDs(
-                    x[0],
-                    put_sos = params['vocab']['source_sos'],
-                    put_eos = params['vocab']['source_eos']),
-                self.target_vocab.line2IDs(
-                    x[1],
-                    put_sos = True,
-                    put_eos = True))
+                self.source_vocab.line2IDs(x[0]),
+                self.target_vocab.line2IDs(x[1]))
         )
 
         if params['train']['batch']['fixed_capacity']:
-            src_trg_IDs = src_trg_IDs.map(dp.gen_random_sample,
+            src_trg_IDs.map(dp.gen_random_sample,
                 bufsize=params['train']['batch']['shuffle_buffer_size'])
-            if params['train']['batch'].get('length_smoothing', None) is not None:
-                src_trg_IDs = src_trg_IDs.map(dp.gen_segment_sort,
-                    segsize=params['train']['batch']['length_smoothing'],
+
+            smoothing = params['train']['batch'].get('length_smoothing', None)
+            if smoothing is not None:
+                src_trg_IDs.map(
+                    dp.gen_segment_sort,
+                    segsize=smoothing,
                     key = lambda x: len(x[0]))
-            src_trg_IDs = src_trg_IDs.map(
+
+            src_trg_IDs.map(
                 dp.gen_dual_const_capacity_batch,
                 params['train']['batch']['capacity'] // self.n_gpus,
                 PAD_ID=self.source_vocab.PAD_ID)
+            
+            if smoothing is not None:
+                src_trg_IDs.map(
+                    dp.gen_random_sample,
+                    bufsize = params['train']['batch']['post_smooth_shuf_buf'])
 
             train_data = tf.data.Dataset.from_generator(
                 src_trg_IDs,
@@ -195,7 +198,7 @@ class Train:
 
 
     def check_train_data(self):
-        train_data = self.make_dev_data()
+        train_data = self.make_train_data()
         train_iterator = train_data.make_initializable_iterator()
         fetch = [train_iterator.get_next() for i in range(self.n_gpus)]
         with tf.Session() as sess:
@@ -206,8 +209,8 @@ class Train:
                 try:
                     ret = sess.run(fetch)
                     for (x, lx), (y, ly) in ret:
-                        print(x.shape, y.shape)
-                    if step == 1000:
+                        print(x.tolist(), lx.tolist())
+                    if step == 5:
                         exit(0)
                     #sess.run(fetch)
                     step += 1
@@ -222,31 +225,26 @@ class Train:
 
     def make_dev_data(self):
         params = self.params
-        dev_src_IDs = dp.CallGenWrapper(
-            lambda: dp.gen_lines_from_file(params['train']['data']['source_dev'])
-        ).map(
-            dp.gen_line2IDs,
-            self.source_vocab,
-            put_sos = params['vocab']['source_sos'],
-            put_eos = params['vocab']['source_eos'])
-        dev_trg_IDs = dp.CallGenWrapper(
-            lambda: dp.gen_lines_from_file(params['train']['data']['target_dev'])
-        ).map(
-            dp.gen_line2IDs,
-            self.target_vocab,
-            put_sos = True,
-            put_eos = True)
+        gen = dp.CallGenWrapper(
+            lambda: dp.gen_multi_lines_from_file(
+                params['train']['data']['source_dev'],
+                params['train']['data']['target_dev'])
+            ).map_element(
+                lambda x: (
+                    self.source_vocab.line2IDs(x[0]),
+                    self.target_vocab.line2IDs(x[1]))
+            ).map(
+                dp.gen_segment_sort, segsize=10000, key=lambda x:len(x[0])
+            ).map(
+                dp.gen_dual_const_capacity_batch,
+                params['train']['batch']['capacity'] // self.n_gpus,
+                PAD_ID=self.source_vocab.PAD_ID)
 
         dev_data = tf.data.Dataset.from_generator(
-            dp.CallGenWrapper.zip(dev_src_IDs, dev_trg_IDs),
-            (tf.int32, tf.int32),
-            ([None], [None])
-            ).map(lambda x, y: ((x, tf.shape(x)[0]), (y, tf.shape(y)[0]))
-            ).padded_batch(
-                params["train"]["batch"]["size"] // self.n_gpus,
-                (([None], []), ([None], [])),
-                ((self.source_vocab.PAD_ID, 0), (self.target_vocab.PAD_ID, 0))
-            ).prefetch(self.n_gpus + 1)
+            gen,
+            ((tf.int32, tf.int32), (tf.int32, tf.int32)),
+            (([None, None], [None]), ([None, None], [None]))
+        ).prefetch(self.n_gpus + 1)
         return dev_data
 
 

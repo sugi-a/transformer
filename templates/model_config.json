@@ -6,6 +6,7 @@
             "size": 64,
             "capacity": 8192,
             "length_smoothing": 10000,
+            "post_smooth_shuf_buf": 200,
             "shuffle_buffer_size": 200000
         },
         "warm_up_step": 4000,
@@ -28,8 +29,9 @@
             "target_dev": ""
         }
     },
-    "test": {
-        "decode_config":{
+    "inference":{
+        "header": "<s>",
+        "decoding":{
             "sampling_method": 0,
             "length_penalty_a": 1.0
         }

@@ -70,24 +70,24 @@ class Inference:
         params = self.params
 
         # Merging the default decoding setting and the one specified at runtime.
-        if not 'decode_config' in params['test']:
-            params['test']['decode_config'] = {}
-        merge_nested_dict(params['test']['decode_config'], decode_config)
-        logger.debug('Decode configuration: ' + str(params['test']['decode_config']))
+        self.decoding = params['inference']['decoding']
+        merge_nested_dict(self.decoding, decode_config)
+        logger.debug('Decode configuration: ' + str(self.decoding))
 
         # Vocabulary utility
         self.vocab = dp.Vocabulary(
             params["vocab"]["target_dict"],
-            UNK_ID= params["vocab"]["UNK_ID"],
-            EOS_ID= params["vocab"]["EOS_ID"],
-            PAD_ID= params["vocab"]["PAD_ID"])
+            UNK_ID = params["vocab"]["UNK_ID"],
+            EOS_ID = params["vocab"]["EOS_ID"],
+            PAD_ID = params["vocab"]["PAD_ID"],
+            SOS_ID = params["vocab"]["SOS_ID"])
         
         self.src_vocab = dp.Vocabulary(
             params['vocab']['source_dict'],
-            UNK_ID=params['vocab']['UNK_ID'],
-            EOS_ID=params['vocab']['EOS_ID'],
-            PAD_ID=params['vocab']['PAD_ID']
-        )
+            UNK_ID = params['vocab']['UNK_ID'],
+            EOS_ID = params['vocab']['EOS_ID'],
+            PAD_ID = params['vocab']['PAD_ID'],
+            SOS_ID = params["vocab"]["SOS_ID"])
 
         # Select the method to convert IDs to tokens
         if 'IDs2text' in self.config:
@@ -154,10 +154,11 @@ class Inference:
         beam_candidates, scores = self.model.decode_V2(
             x,
             x_len,
-            beam_size,
-            return_search_results=True,
-            init_y=init_y,
-            init_y_len=init_y_len)
+            init_y,
+            init_y_len,
+            beam_size = beam_size,
+            return_search_results = True,
+            decode_config = self.decoding)
         return beam_candidates, scores
 
     def fn_perplexity(self, inputs):
@@ -279,15 +280,10 @@ class Inference:
         return list(self.make_batches_iter(*args, **kwargs))
 
 
-    def make_batches_iter(self, x, y, x_put_sos=None, x_put_eos=None,
-        y_put_sos=True, y_put_eos=True, batch_capacity=None):
-        if x_put_sos is None:
-            x_put_sos = self.params['vocab']['source_sos']
-        if x_put_eos is None:
-            x_put_eos = self.params['vocab']['source_eos']
+    def make_batches_iter(self, x, y, batch_capacity=None):
         batch_capacity = batch_capacity or (self.batch_capacity * 5)
-        x_IDs = dp.gen_line2IDs(x, self.src_vocab, put_eos=x_put_eos, put_sos=x_put_sos)
-        y_IDs = dp.gen_line2IDs(y, self.vocab, put_eos=y_put_eos, put_sos=y_put_sos)
+        x_IDs = dp.gen_line2IDs(x, self.src_vocab)
+        y_IDs = dp.gen_line2IDs(y, self.vocab)
         return dp.gen_dual_const_capacity_batch(zip(x_IDs, y_IDs), batch_capacity, self.vocab.PAD_ID)
 
 
@@ -308,7 +304,7 @@ class Inference:
 
     def calculate_translation_score(self, sources, targets, length_penalty_a=None):
         if length_penalty_a is None:
-            length_penalty_a = self.params["test"]["decode_config"]["length_penalty_a"]
+            length_penalty_a = self.decoding['length_penalty_a']
         batches = self.make_batches(sources, targets)
         scores, = self.execute_op(self.op_trans_score, batches, {self.ph_length_penalty: length_penalty_a})
         return scores
@@ -319,9 +315,14 @@ class Inference:
         # Translate
         batch_capacity = 5 * self.batch_capacity // beam_size
         if init_y_texts is None:
-            init_y_texts = [''] * len(texts)
+            header = self.params['inference']['header']
+            if type(header) == int:
+                header = self.vocab.ID2tok[header]
+            elif header is None:
+                header = ''
+            init_y_texts = [header] * len(texts)
 
-        batches = self.make_batches(texts, init_y_texts, batch_capacity, y_put_eos=False)
+        batches = self.make_batches(texts, init_y_texts, batch_capacity)
         candidates, scores = self.execute_op(self.op_beam_hypos_scores, batches, {self.ph_beam_size: beam_size})
 
 

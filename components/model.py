@@ -638,7 +638,7 @@ class Transformer(tf.layers.Layer):
             self.params["vocab"]["EOS_ID"],
             self.params["vocab"]["PAD_ID"],
             offsets=offsets,
-            params=decode_config or self.params['test']['decode_config'])
+            params=decode_config)
 
         # Remove offsets
         hypos = tf.reshape(
