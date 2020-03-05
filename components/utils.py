@@ -25,7 +25,7 @@ class CumulativeAverage(object):
             self.average = nest.pack_sequence_as(inputs, flat_average)
 
 
-def compute_parallel_and_average(model_fn, inputs_list, averaging_device=None, *args, **kwargs):
+def compute_parallel_and_average(model_fn, inputs_list, *args, averaging_device=None, **kwargs):
     """
     Args:
         model_fn:
@@ -113,7 +113,58 @@ def compute_parallel(model_fn, inputs_list, *args, **kwargs):
             outputs_list.append(model_fn(inputs, *args, **kwargs))
     
     return outputs_list
+
+
+def batch_split_map(fn, inputs, out_dtypes, nsplit, pad_to_fit=None):
+    batch_size = tf.shape(nest.flatten(inputs)[0])[0]
+    def _reshape(x):
+        s = tf.concat([[nsplit, -1], tf.shape(x)[1:]], axis=0)
+        return tf.reshape(x, s)
+
+    def _pad_to_fit(x):
+        pad_to = (tf.floor_div(batch_size - 1, nsplit) + 1) * nsplit
+        pad_len = pad_to - batch_size
+        padding = tf.fill(tf.concat([[pad_len], tf.shape(x)[1:]], axis=0), pad_to_fit)
+        x = tf.concat([x, padding], axis=0)
+
+    if pad_to_fit is not None:
+        inputs = nest.map_structure(_pad_to_fit, inputs)
     
+    inputs = nest.map_structure(_reshape, inputs)
+    return tf.map_fn(fn, inputs, dtype=out_dtypes, parallel_iterations=1, back_prop=False)
+
+
+def non_even_split_frag_sizes(n, m):
+    """
+    e.g.
+    n=10, m=3: [4, 3, 3]
+    n=14, m=5: [3, 3, 3, 3, 2]
+    """
+    remainder = tf.floormod(n, m)
+    quotient = tf.floor_div(n, n)
+    return tf.concat(
+        [tf.fill([remainder], quotient + 1), tf.fill([n - remainder], quotient)],
+        axis=0)
+
+
+def batch_split_execution(fn, out_shapes, inputs, nsplit):
+    flat_inputs = nest.flatten(inputs)
+    batch_size = tf.shape(flat_inputs[0])[0]
+    segsize = non_even_split_frag_sizes(batch_size, nsplit)
+    def _cond_fn(x, segi):
+        return tf.equal(segi, nsplit)
+
+    def _body_fn(x, segi):
+        start = x
+        end = start + segsize[segi]
+        seg_in = nest.map_structure(lambda x:x[start:end], inputs)
+        seg_out = fn(seg_in)
+        return [end, segi + 1]
+
+    finish_state = tf.while_loop(_cond_fn,
+        _body_fn,
+        [0, 0],
+        )
 
 def custom_summary(summary_dict):
     """

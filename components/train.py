@@ -6,13 +6,13 @@ from tensorflow.contrib.framework import nest
 import numpy as np
 
 
-from .utils import *
+from .utils import compute_parallel_and_average, batch_split_map, custom_summary, CumulativeAverage
 from .model import *
 from . import dataprocessing as dp
 from .inference import Inference
 
 class Train:
-    def __init__(self, model_dir, n_gpus=1, n_cpu_cores=4, random_seed=0):
+    def __init__(self, model_dir, n_gpus=1, n_cpu_cores=4, random_seed=0, n_accum=1):
 
         # model's working directory
         self.model_dir = model_dir
@@ -30,6 +30,7 @@ class Train:
 
         # Computation options
         self.n_gpus = n_gpus
+        self.n_accum = n_accum
         self.n_cpu_cores = n_cpu_cores
         self.random_seed = random_seed
 
@@ -112,7 +113,34 @@ class Train:
         loss, accuracy, ntokens = self.__get_loss(y[:, 1:], y_len - 1, logits)
         return {'loss': loss, 'accuracy': accuracy}, ntokens
 
+
+    def __accumu_info(self, inputs, n_accum, mode):
+        if mode == 'train':
+            out_dtypes = (
+                {
+                    'loss': tf.float32,
+                    'accuracy': tf.float32,
+                    'gradient': [x.dtype for x in grads]
+                }, tf.int32)
+            fn = __get_train_info
+        elif mode == 'dev':
+            out_dtypes = (
+                {
+                    'loss': tf.float32,
+                    'accuracy': tf.float32
+                }, tf.int32)
+            fn = __get_dev_info
+
+        info, n_tokens = batch_split_map(fn, inputs, out_dtypes, n_accum, pad_to_fit=True)
+        total_tokens = tf.reduce_sum(n_tokens) 
+        n_tok_list = tf.unstack(n_tokens)
+        def __avg(x):
+            xs = tf.unstack(x, axis=0)
+            return tf.add_n([n_tok * _x / total_tokens for n_tok, _x in zip(n_tok_list, xs)])
+
+        return nest.map_structure(__avg, info), total_tokens
         
+    
     def __get_learning_rate(self, step):
         step = tf.cast(step, tf.float32)
         warm_up_step = tf.cast(self.params["train"]["warm_up_step"], tf.float32)
@@ -285,12 +313,40 @@ class Train:
         self.optimizer = tf.train.AdamOptimizer(lr)
         self.train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=model.scope_name)
 
+        # Distribution of batches
         if self.n_gpus == 1:
-            train_info, _ = self.__get_train_info(train_parallel_inputs[0])
-            dev_info, dev_ntokens = self.__get_dev_info(dev_parallel_inputs[0])
+            if self.n_accum == 1:
+                train_info, _ = self.__get_train_info(train_parallel_inputs[0])
+                dev_info, dev_ntokens = self.__get_dev_info(dev_parallel_inputs[0])
+            else:
+                train_info, _ = self.__accumu_info(
+                    train_parallel_inputs[0],
+                    n_accum = self.n_accum,
+                    mode = 'train')
+                dev_info, _ = self.__accumu_info(
+                    dev_parallel_inputs[0],
+                    self.n_accum,
+                    'dev')
         else:
-            train_info, _ = compute_parallel_and_average(self.__get_train_info, train_parallel_inputs)
-            dev_info, dev_ntokens = compute_parallel_and_average(self.__get_dev_info, dev_parallel_inputs)
+            if self.n_accum == 1:
+                train_info, _ = compute_parallel_and_average(
+                    self.__get_train_info,
+                    train_parallel_inputs)
+                dev_info, dev_ntokens = compute_parallel_and_average(
+                    self.__get_dev_info,
+                    dev_parallel_inputs)
+            else:
+                train_info, _ = compute_parallel_and_average(
+                    self.__accumu_info,
+                    train_parallel_inputs,
+                    n_accum = self.n_accum,
+                    mode = 'train')
+                dev_info, _ = compute_parallel_and_average(
+                    self.__accumu_info,
+                    dev_parallel_inputs,
+                    n_accum = self.n_accum,
+                    mode = 'dev')
+
         
         # updating parameters
         grad_vars = [(grad, v) for grad, v in zip(train_info['gradient'], self.train_vars)]
@@ -536,6 +592,7 @@ def main():
                         help='Number of cpu cores used by `tf.data.Dataset.map`')
     parser.add_argument('--n_gpus', default=1, type=int,
                         help='Number of GPUs available')
+    parser.add_argument('--n_accumulation', '--n_accum', default=1, type=int)
     parser.add_argument('--random_seed', default=0, type=int)
     parser.add_argument('--check-train-data', action='store_true')
     args = parser.parse_args()
@@ -543,7 +600,12 @@ def main():
     if args.check_train_data:
         Train(args.model_dir, args.n_gpus, args.n_cpu_cores, args.random_seed).check_train_data()
     else:
-        Train(args.model_dir, args.n_gpus, args.n_cpu_cores, args.random_seed).train()
+        Train(
+            args.model_dir,
+            n_gpus = args.n_gpus,
+            n_cpu_cores = args.n_cpu_cores,
+            random_seed = args.random_seed,
+            n_accum = args.n_accumulation).train()
 
 if __name__ == '__main__':
     main()
