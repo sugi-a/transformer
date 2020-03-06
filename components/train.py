@@ -120,23 +120,25 @@ class Train:
                 {
                     'loss': tf.float32,
                     'accuracy': tf.float32,
-                    'gradient': [x.dtype for x in grads]
-                }, tf.int32)
-            fn = __get_train_info
+                    'gradient': tuple(x.dtype for x in self.train_vars)
+                }, tf.float32)
+            fn = self.__get_train_info
         elif mode == 'dev':
             out_dtypes = (
                 {
                     'loss': tf.float32,
                     'accuracy': tf.float32
-                }, tf.int32)
-            fn = __get_dev_info
+                }, tf.float32)
+            fn = self.__get_dev_info
 
-        info, n_tokens = batch_split_map(fn, inputs, out_dtypes, n_accum, pad_to_fit=True)
+        info, n_tokens = batch_split_map(fn, inputs, out_dtypes, n_accum, pad_to_fit=0)
         total_tokens = tf.reduce_sum(n_tokens) 
         n_tok_list = tf.unstack(n_tokens)
         def __avg(x):
             xs = tf.unstack(x, axis=0)
-            return tf.add_n([n_tok * _x / total_tokens for n_tok, _x in zip(n_tok_list, xs)])
+            return tf.add_n([
+                tf.cast(n_tok, tf.float32) * _x / tf.cast(total_tokens, tf.float32)
+                for n_tok, _x in zip(n_tok_list, xs)])
 
         return nest.map_structure(__avg, info), total_tokens
         
@@ -323,10 +325,10 @@ class Train:
                     train_parallel_inputs[0],
                     n_accum = self.n_accum,
                     mode = 'train')
-                dev_info, _ = self.__accumu_info(
+                dev_info, dev_ntokens = self.__accumu_info(
                     dev_parallel_inputs[0],
-                    self.n_accum,
-                    'dev')
+                    n_accum = self.n_accum,
+                    mode = 'dev')
         else:
             if self.n_accum == 1:
                 train_info, _ = compute_parallel_and_average(
@@ -341,7 +343,7 @@ class Train:
                     train_parallel_inputs,
                     n_accum = self.n_accum,
                     mode = 'train')
-                dev_info, _ = compute_parallel_and_average(
+                dev_info, dev_ntokens = compute_parallel_and_average(
                     self.__accumu_info,
                     dev_parallel_inputs,
                     n_accum = self.n_accum,

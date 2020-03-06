@@ -125,7 +125,7 @@ def batch_split_map(fn, inputs, out_dtypes, nsplit, pad_to_fit=None):
         pad_to = (tf.floor_div(batch_size - 1, nsplit) + 1) * nsplit
         pad_len = pad_to - batch_size
         padding = tf.fill(tf.concat([[pad_len], tf.shape(x)[1:]], axis=0), pad_to_fit)
-        x = tf.concat([x, padding], axis=0)
+        return tf.concat([x, padding], axis=0)
 
     if pad_to_fit is not None:
         inputs = nest.map_structure(_pad_to_fit, inputs)
