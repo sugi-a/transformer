@@ -7,7 +7,7 @@ import numpy as np
 
 from . import datasetloader
 from .language_model import DecoderLanguageModel, load_model_config
-from ..components.utils import CumulativeAverage, compute_parallel_and_average, batch_split_map
+from ..components.utils import CumulativeAverage, compute_parallel_and_average, batch_split_map, tf_restorable_vars, custom_summary
 from ..components import dataprocessing as dp
 from ..components.model import label_smoothing
 

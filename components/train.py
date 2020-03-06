@@ -6,7 +6,7 @@ from tensorflow.contrib.framework import nest
 import numpy as np
 
 
-from .utils import compute_parallel_and_average, batch_split_map, custom_summary, CumulativeAverage
+from .utils import compute_parallel_and_average, batch_split_map, custom_summary, CumulativeAverage, tf_restorable_vars
 from .model import *
 from . import dataprocessing as dp
 from .inference import Inference
