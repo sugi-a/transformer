@@ -85,12 +85,13 @@ def gen_multi_padded_batch(multi_seq_iter, batch_size, PAD_ID=0):
             (pad_seqs(seqs, PAD_ID=PAD_ID), [len(seq) for seq in seqs])
             for seqs in zip(*batches))
 
-def gen_const_capacity_batch(seq_iter, capacity, PAD_ID=0):
+def gen_const_capacity_batch(seq_iter, capacity, PAD_ID=0, get_len_fn=None):
+    get_len_fn = get_len_fn or (lambda x: len(x))
     seqs = []
     lens = []
     maxlen = 0
     for seq in seq_iter:
-        l = len(seq)
+        l = get_len_fn(seq)
         if l > capacity:
             raise(ValueError, 'Sequence longer than batch capacity. ({} vs {})'.format(l, capacity))
         
@@ -107,6 +108,33 @@ def gen_const_capacity_batch(seq_iter, capacity, PAD_ID=0):
     
     if len(seqs) > 0:
         yield pad_seqs(seqs, maxlen=maxlen, PAD_ID=PAD_ID), lens
+
+
+def gen_const_capacity_batch_multi_seq(it, capacity, PAD_ID=0):
+    get_len_fn = lambda x: max(len(a) for a in x)
+    mseqs = None
+    mlens = None
+    maxlen = 0
+    for x in it:
+        l = get_len_fn(x)
+        if l > capacity:
+            raise(ValueError, 'Sequence longer than batch capacity. ({} vs {})'.format(l, capacity))
+        if mseqs is None:
+            mseqs, mlens = ([[] for i in range(len(x))] for j in range(2))
+        batchLen = len(mseqs[0])
+        if max(maxlen, l) * (batchLen + 1) > capacity:
+            yield tuple((pad_seqs(seqs, PAD_ID=PAD_ID), lens) for seqs, lens in zip(mseqs, mlens))
+            mseqs = [[] for i in range(len(x))]
+            mlens = [[] for i in range(len(x))]
+            maxlen = 0
+
+        maxlen = max(maxlen, l)
+        for seqs, lens, seq in zip(mseqs, mlens, x):
+            seqs.append(seq)
+            lens.append(len(seq))
+
+    if len(mseqs[0]) > 0:
+        yield tuple((pad_seqs(seqs, PAD_ID=PAD_ID), lens) for seqs, lens in zip(mseqs, mlens))
 
 
 def gen_dual_const_capacity_batch(dual_seq_iter, capacity, PAD_ID=0):
