@@ -208,14 +208,15 @@ class Inference:
             list of replicated operations to be computed in parallel.
             """
 
-        if input_phs is None:
-            input_phs = self.default_phs
-            op_fn = lambda: compute_parallel(fn, self.default_parallel_inputs, *args, **kwargs)
-        else:
-            parallel_inputs = non_even_split(input_phs, self.n_gpus)
-            op_fn = lambda: compute_parallel(fn, parallel_inputs, *args, **kwargs)
+        with self.graph.as_default():
+            if input_phs is None:
+                input_phs = self.default_phs
+                op_fn = lambda: compute_parallel(fn, self.default_parallel_inputs, *args, **kwargs)
+            else:
+                parallel_inputs = non_even_split(input_phs, self.n_gpus)
+                op_fn = lambda: compute_parallel(fn, parallel_inputs, *args, **kwargs)
 
-        return InferenceOpPH(op_fn, input_phs)
+            return InferenceOpPH(op_fn, input_phs)
 
 
     def execute_op_iter(self, op, batches_iter, _feed_dict=None):
