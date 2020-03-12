@@ -81,17 +81,45 @@ class Inference(MTInference):
         (x, x_len) = inputs
         x_in, x_out = x[:, :-1], x[:, 1:]
         io_len = x_len - 1
+        seq_log_prob, = self.fn_log_prob(inputs)
+        perp = tf.exp(-seq_log_prob / tf.cast(io_len, tf.float32))
+
+        return [perp]
+
+
+    def fn_log_prob(self, inputs):
+        (x, x_len) = inputs
+        x_in, x_out = x[:, :-1], x[:, 1:]
+        io_len = x_len - 1
 
         logits = self.model.get_logits(x_in, training=False)
         is_target = tf.sequence_mask(io_len, tf.shape(x_in)[1], dtype=tf.float32)
 
-        log_prob_dist = tf.math.log_softmax(logits, axis=-1) # [batch, length, vocab]
-        log_prob = tf.batch_gather(log_prob_dist, x_out[:, :, None]) # [batch, length, 1]
-        log_prob = log_prob[:, :, 0]
-        seq_log_prob = tf.reduce_sum(log_prob * is_target, axis=1) #[batch]
-        perp = tf.exp(-seq_log_prob / tf.cast(io_len, tf.float32))
+        log_prob_dist = tf.math.log_softmax(logits, axis=-1)
+        log_prob = tf.batch_gather(log_prob_dist, x_out[:,:, None])[:, :, 0]
+        seq_log_prob = tf.reduce_sum(log_prob * is_target, axis=1)
 
-        return [perp]
+        return [seq_log_prob]
+
+
+    def fn_cond_log_prob(self, inputs):
+        (x, x_len), (c, c_len) = inputs
+        mcl, mxl = tf.shape(c)[1], tf.shape(x)[1]
+        ids = tf.range(mcl + mxl)[None] + (
+            1 - tf.sequence_mask(c_len, mcl + mxl, dtype=tf.int32)) * (mcl - c_len)[:, None]
+        ids = tf.minimum(ids, mcl + mxl - 1)
+        joint = tf.batch_gather(tf.concat([c, x], axis=-1), ids)
+        j_len = x_len + c_len
+        j_in, j_out = joint[:, :-1], joint[:, 1:]
+
+        logits = self.model.get_logits(j_in, training=False)
+        is_target = tf.sequence_mask(j_len - 1, tf.shape(j_in)[1], dtype=tf.float32
+            ) - tf.sequence_mask(c_len - 1, tf.shape(j_in)[1], dtype=tf.float32)
+
+        log_prob_dist = tf.math.log_softmax(logits, axis=-1)
+        log_prob = tf.batch_gather(log_prob_dist, j_out[:,:, None])[:, :, 0]
+        seq_log_prob = tf.reduce_sum(log_prob * is_target, axis=1)
+        return [seq_log_prob]
 
 
     def make_feed_dict(self, batch):
@@ -103,14 +131,8 @@ class Inference(MTInference):
         batch_capacity = batch_capacity or self.batch_capacity
 
         IDs = dp.gen_line2IDs(x, self.vocab)
-        _header = self.params['vocab']['sent_header']
-        _footer = self.params['vocab']['sent_footer']
-        if header and _header is not None:
-            IDs = ([_header] + ids for ids in IDs)
-        if footer and _footer is not None:
-            IDs = (ids + [_footer] for ids in IDs)
         return dp.gen_const_capacity_batch(
-            IDs
+            IDs,
             batch_capacity,
             self.vocab.PAD_ID)
 
@@ -120,19 +142,8 @@ class Inference(MTInference):
         x: [(line1-1, line1-2, ..), (line2-1, line2-2, ...), ...]
             """
         batch_capacity = batch_capacity or self.batch_capacity
-        header = self.params['vocab']['sent_header']
-        footer = self.params['vocab']['sent_footer']
-        def __concat(x):
-            ret = []
-            for line in x:
-                if header is not None:
-                    ret.append(header)
-                ret.extend(self.vocab.line2IDs(line))
-                if footer is not None:
-                    ret.append(footer)
-            yield ret
-        IDs = map(__concat, x)
-        return dp.gen_const_capacity_batch(IDs, batch_capacity, self.vocab.PAD_ID)
+        IDs = (tuple(self.vocab.line2IDs(line) for line in row) for row in x)
+        return dp.gen_const_capacity_batch_multi_seq(IDs, batch_capacity, self.vocab.PAD_ID)
 
 
 
@@ -152,19 +163,47 @@ class Inference(MTInference):
 
 
     def calculate_log_prob(self, x):
+        if not hasattr(self, 'op_log_prob'):
+            self.op_log_prob = self.make_op(self.fn_log_prob)
         batches = self.make_batches(x)
-        sent_perp, = self.execute_op(self.op_perplexity, batches)
-        sent_lens = np.array(sum((batch[1] for batch in batches), []))
-        logprob = - np.log(sent_perp) * sent_lens
+        logprob, = self.execute_op(self.op_log_prob, batches)
         return logprob
 
 
-    def calculate_pmi(self, context, x):
-        """PMI(context, x) = log p(context^x) - log p(context) - log p(x)"""
-        assert len(context) == len(x)
-        n = len(context)
-        probs = self.calculate_log_prob([c + ' ' + _x for c, _x in zip(context, x)] + context + x)
-        return probs[:n] - probs[n:n * 2] - probs[n*2:]
+    def calculate_cond_log_prob(self, c, x):
+        if not hasattr(self, 'op_c_log_prob'):
+            phs = (
+                (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None])),
+                (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None]))
+                )
+            self.op_c_log_prob = self.make_op(self.fn_cond_log_prob, input_phs=phs)
+        batches = list(self.make_multi_sentence_batch_gen(zip(x, c)))
+        logprob, = self.execute_op(self.op_c_log_prob, batches)
+        return logprob
+
+
+    def calculate_pmi(self, c, x, sep=None, head=None):
+        """PMI(c, x; head, sep)
+        = log p(x | head c sep) - log p(x | head sep)
+        = log p(c sep x | head) - log p(c sep | head) - log p(sep x | head) + log p(sep | head)"""
+        n = len(c)
+        if sep is None:
+            sep = [''] * n
+        elif type(sep) == str:
+            sep = [sep] * n
+        if head is None:
+            head = [''] * n
+        elif type(head) == str:
+            head = [head] * n
+
+        assert n == len(x) == len(sep) == len(head)
+
+        probs = self.calculate_cond_log_prob(
+            ['{} {} {}'.format(_h, _c, _s) for _h, _c, _s in zip(head, c, sep)] +
+            ['{} {}'.format(_h, _s) for _h, _s in zip(head, sep)],
+            x + x)
+        probs = np.array(probs)
+        return probs[:n] - probs[n:n*2]
 
 
 def main():
@@ -187,9 +226,6 @@ def main():
     parser.add_argument('--checkpoint', type=str, default=None)
     parser.add_argument('--batch_capacity', type=int, default=None)
 
-    # for PMI
-    parser.add_argument('--context', '-c', type=str, default=None)
-    parser.add_argument('--sentence', '-x', type=str, default=None)
     args = parser.parse_args()
 
     inference = Inference(
@@ -213,12 +249,8 @@ def main():
             for p in inference.calculate_log_prob(x):
                 print(p)
     elif args.mode == PMI:
-        with open(args.context) as f:
-            context = f.readlines()
-        with open(args.sentence) as f:
-            sentence = f.readlines()
-        
-        for p in inference.calculate_pmi(context, sentence):
+        head, c, sep, x = zip(*map(lambda x: x.split('\t'), sys.stdin))
+        for p in inference.calculate_pmi(c, x, sep, head):
             print(p)
 
 
