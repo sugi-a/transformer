@@ -298,7 +298,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
             shape_invariants,
             back_prop=False,
             maximum_iterations=max_iter,
-            parallel_iterations=2
+            parallel_iterations=1
             )
 
 
@@ -584,7 +584,7 @@ def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlen
             shape_invariants,
             back_prop=False,
             maximum_iterations=max_iter,
-            parallel_iterations=2
+            parallel_iterations=1
             )
 
 
