@@ -70,12 +70,6 @@ class Inference(MTInference):
                 tf.placeholder(tf.int32, [None, None]),
                 tf.placeholder(tf.int32, [None]))
 
-            # Splitting for data parallel computing
-            self.default_parallel_inputs = non_even_split(self.default_phs, self.n_gpus)
-            
-            # Computation graph for perplexity
-            self.op_perplexity = self.make_op(self.fn_perplexity)
-
 
     def fn_perplexity(self, inputs):
         (x, x_len) = inputs
@@ -148,12 +142,18 @@ class Inference(MTInference):
 
 
     def calculate_sentence_perplexity(self, x):
+        if not hasattr(self, 'op_perplexity'):
+            self.op_perplexity = self.make_op(self.fn_perplexity, self.default_phs)
+
         batches = self.make_batches(x)
         perp, = self.execute_op(self.op_perplexity, batches)
         return perp 
 
 
     def calculate_corpus_perplexity(self, x):
+        if not hasattr(self, 'op_perplexity'):
+            self.op_perplexity = self.make_op(self.fn_perplexity, self.default_phs)
+
         batches = self.make_batches(x)
         sent_perp, = self.execute_op(self.op_perplexity, batches)
         sent_lens = np.array(sum((batch[1] for batch in batches), []))
@@ -164,7 +164,7 @@ class Inference(MTInference):
 
     def calculate_log_prob(self, x):
         if not hasattr(self, 'op_log_prob'):
-            self.op_log_prob = self.make_op(self.fn_log_prob)
+            self.op_log_prob = self.make_op(self.fn_log_prob, self.default_phs)
         batches = self.make_batches(x)
         logprob, = self.execute_op(self.op_log_prob, batches)
         return logprob
@@ -172,11 +172,12 @@ class Inference(MTInference):
 
     def calculate_cond_log_prob(self, c, x):
         if not hasattr(self, 'op_c_log_prob'):
-            phs = (
-                (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None])),
-                (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None]))
-                )
-            self.op_c_log_prob = self.make_op(self.fn_cond_log_prob, input_phs=phs)
+            with self.graph.as_default():
+                phs = (
+                    (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None])),
+                    (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None]))
+                    )
+                self.op_c_log_prob = self.make_op(self.fn_cond_log_prob, phs)
         batches = list(self.make_multi_sentence_batch_gen(zip(x, c)))
         logprob, = self.execute_op(self.op_c_log_prob, batches)
         return logprob
@@ -204,6 +205,17 @@ class Inference(MTInference):
             x + x)
         probs = np.array(probs)
         return probs[:n] - probs[n:n*2]
+
+
+    def calculate_pmi_v2(self, c, null_c, x):
+        n = len(c)
+        if type(null_c) == str:
+            null_c = [null_c] * n
+        assert n == len(null_c) == len(x)
+
+        probs = self.calculate_cond_log_prob(c + null_c, x + x)
+        probs = np.array(probs)
+        return probs[:n] - probs[n:]
 
 
 def main():
