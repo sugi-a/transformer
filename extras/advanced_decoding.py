@@ -20,7 +20,7 @@ class PMIFusionDecoder(Inference):
         self.tm = self.model
 
         # Creating language model
-        self.lmi = LMInference(lm_dir, n_gpus=self.n_gpus, n_cpu_cores=self.n_cpu_cores, batch_capacity=self.batch_capacity//2, checkpoint=lm_checkpoint)
+        self.lmi = LMInference(lm_dir, graph=self.graph, n_gpus=self.n_gpus, n_cpu_cores=self.n_cpu_cores, batch_capacity=self.batch_capacity//2, checkpoint=lm_checkpoint)
         self.lm = self.lmi.model
 
         with self.graph.as_default():
@@ -317,16 +317,16 @@ class PMIFusionDecoder(Inference):
 
 
     def top_pmi_analysis(self, x, y, c, k=8):
-        x = dp.gen_line2IDs(x, self.src_vocab, put_eos=True)
-        y,c = (dp.gen_line2IDs(_, self.vocab, put_eos=True) for _ in (y, c))
+        x = dp.gen_line2IDs(x)
+        y,c = (dp.gen_line2IDs(_, self.vocab) for _ in (y, c))
         batches = list(dp.gen_multi_padded_batch(
             zip(x, y, c), self.batch_capacity // 128, self.vocab.PAD_ID))
         return self.execute_op(self.op_top_pmi, batches, {self.ph_beam_size: k})
 
 
     def cumulative_score(self, x, y, c, option=0, beam_size=1):
-        x = dp.gen_line2IDs(x, self.src_vocab, put_eos=True)
-        y,c = (dp.gen_line2IDs(_, self.vocab, put_eos=True) for _ in (y, c))
+        x = dp.gen_line2IDs(x, self.src_vocab)
+        y,c = (dp.gen_line2IDs(_, self.vocab) for _ in (y, c))
         batches = list(dp.gen_multi_padded_batch(
             zip(x, y, c), self.batch_capacity // 128, self.vocab.PAD_ID))
 
@@ -338,8 +338,8 @@ class PMIFusionDecoder(Inference):
 
     
     def cumulative_pmi(self, y, c):
-        c = dp.gen_line2IDs(c, self.vocab, put_eos=True)
-        y = dp.gen_line2IDs(y, self.vocab, put_eos=False)
+        c = dp.gen_line2IDs(c, self.vocab)
+        y = dp.gen_line2IDs(y, self.vocab)
         batches = list(dp.gen_dual_const_capacity_batch(zip(y,c), self.batch_capacity, self.vocab.PAD_ID))
         return self.execute_op(self.op_cumu_pmi, batches)
 
