@@ -41,7 +41,7 @@ class InferenceOpDS:
     @property
     def op(self):
         if self.__op is None:
-            self._op = self.op_fn()
+            self.__op = self.op_fn()
         return self.__op
 
 
@@ -51,6 +51,34 @@ class InferenceOpDS:
             self.input_iter.output_types,
             self.input_iter.output_shapes
         ).prefetch(nprefetch)
+
+
+class OperationWithPlaceholderFeed:
+    def __init__(self, op_fn, data_phs, param_phs=None, graph=None):
+        self.data_phs = data_phs
+        self.param_phs = param_phs or {}
+        self.op_fn = op_fn
+        self.__op = None
+        self.graph = graph or tf.get_default_graph()
+
+
+    @property
+    def op(self):
+        if self.__op is None:
+            with self.graph.as_default():
+                self.__op = self.op_fn()
+        return self.__op
+
+
+    def make_feed_dict(self, batch, param_feeds=None):
+        flatten_batch = nest.flatten_up_to(self.data_phs, batch)
+        flatten_batch_phs = nest.flatten(self.data_phs)
+        ret = {ph: bat for ph, bat in zip(flatten_batch_phs, flatten_batch)}
+
+        param_feeds = param_feeds or {}
+        ret.update({self.param_phs[k]: v for k,v in param_feeds.items()})
+        return ret
+
 
 class Inference:
     def __init__(self, model_dir, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=4, batch_capacity=None, decode_config=None):
@@ -128,26 +156,12 @@ class Inference:
 
         # Computation graph components
         with self.graph.as_default():
-            # Default placeholder for input data
+            # Default placeholder for input data (paired sentences)
             self.default_phs = (
                 (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None])),
                 (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None]))
                 )
 
-            # Splitting for data parallel computing
-            self.default_parallel_inputs = non_even_split(self.default_phs, self.n_gpus)
-            
-            # Operations
-            # computation graph for beam search
-            self.ph_beam_size = tf.placeholder(tf.int32, [])
-            self.op_beam_hypos_scores = self.make_op(self.fn_beam_search, self.ph_beam_size)
-
-            # Computation graph for perplexity
-            self.op_perplexity = self.make_op(self.fn_perplexity)
-
-            # Computation graph for translation score
-            self.ph_length_penalty = tf.placeholder(tf.float64, [])
-            self.op_trans_score = self.make_op(self.fn_translation_score)
 
     def fn_beam_search(self, inputs, beam_size):
         (x, x_len), (init_y, init_y_len) = inputs
@@ -178,7 +192,7 @@ class Inference:
         return [perp]
 
 
-    def fn_translation_score(self, inputs):
+    def fn_translation_score(self, inputs, length_penalty_a):
         (x, x_len), (y, y_len) = inputs
         y_in, y_out = y[:, :-1], y[:, 1:]
         _y_len = y_len - 1
@@ -192,13 +206,13 @@ class Inference:
         seq_log_prob = tf.reduce_sum(log_prob * is_target, axis=1) #[batch]
 
         # penalty coefficient (defined in model.py)
-        penalty = length_penalty(_y_len, self.ph_length_penalty)
+        penalty = length_penalty(_y_len, length_penalty_a)
 
         score = seq_log_prob / penalty 
         
         return [score]
 
-    def make_op(self, fn, *args, input_phs=None, **kwargs):
+    def make_op(self, fn, data_phs, *args, param_phs=None, **kwargs):
         """Create operation which computes the function specified with GPU(s) in parallel.
         Args:
             fn:
@@ -209,23 +223,16 @@ class Inference:
             """
 
         with self.graph.as_default():
-            if input_phs is None:
-                input_phs = self.default_phs
-                op_fn = lambda: compute_parallel(fn, self.default_parallel_inputs, *args, **kwargs)
-            else:
-                parallel_inputs = non_even_split(input_phs, self.n_gpus)
-                op_fn = lambda: compute_parallel(fn, parallel_inputs, *args, **kwargs)
-
-            return InferenceOpPH(op_fn, input_phs)
+            parallel_inputs = non_even_split(data_phs, self.n_gpus)
+            op_fn = lambda: compute_parallel(fn, parallel_inputs, *args, **kwargs)
+            return OperationWithPlaceholderFeed(op_fn, data_phs, param_phs=param_phs)
 
 
-    def execute_op_iter(self, op, batches_iter, _feed_dict=None):
+    def execute_op_iter(self, op, batches_iter, **feeds):
         assert self.session
 
         for batch in batches_iter:
-            feed_dict = op.make_feed_dict(batch)
-            if _feed_dict:
-                feed_dict.update(_feed_dict)
+            feed_dict = op.make_feed_dict(batch, feed)
             
             res = self.session.run(op.op, feed_dict=feed_dict)
             for bat_res in res:
@@ -233,7 +240,7 @@ class Inference:
                     yield items
 
         
-    def execute_op(self, op, batches, _feed_dict=None):
+    def execute_op(self, op, batches, **feeds):
         """Evaluate `op` in the session. `op` must be created by `self.make_op`
         Args:
             op: operation created by `self.make_op`
@@ -249,8 +256,7 @@ class Inference:
         sys.stderr.flush()
         for i, batch in enumerate(batches):
             # feed_dict
-            feed_dict = op.make_feed_dict(batch)
-            if _feed_dict: feed_dict.update(_feed_dict)
+            feed_dict = op.make_feed_dict(batch, feeds)
 
             run_results.extend(self.session.run(op.op, feed_dict=feed_dict))
             sys.stderr.write('{:5.3f} sec/step, steps: {:4}/{:4}\t\r'.format(
@@ -289,12 +295,18 @@ class Inference:
 
 
     def calculate_sentence_perplexity(self, sources, targets):
+        if not hasattr(self, 'op_perplexity'):
+            self.op_perplexity = self.make_op(self.fn_perplexity, self.default_phs)
+
         batches = self.make_batches(sources, targets)
         perp, = self.execute_op(self.op_perplexity, batches)
         return perp 
 
 
     def calculate_corpus_perplexity(self, sources, targets):
+        if not hasattr(self, 'op_perplexity'):
+            self.op_perplexity = self.make_op(self.fn_perplexity, self.default_phs)
+
         batches = self.make_batches(sources, targets)
         sent_perp, = self.execute_op(self.op_perplexity, batches)
         sent_lens = np.array(sum((batch[1][1] for batch in batches), []))
@@ -304,15 +316,35 @@ class Inference:
 
 
     def calculate_translation_score(self, sources, targets, length_penalty_a=None):
+        if not hasattr(self, 'op_trans_score'):
+            # Computation graph for translation score
+            with self.graph.as_default():
+                params = {'length_penalty_a': tf.placeholder(tf.float64, [])}
+                self.op_trans_score = self.make_op(
+                    self.fn_translation_score,
+                    self.default_phs,
+                    **params,
+                    param_phs = params)
+
         if length_penalty_a is None:
             length_penalty_a = self.decoding['length_penalty_a']
         batches = self.make_batches(sources, targets)
-        scores, = self.execute_op(self.op_trans_score, batches, {self.ph_length_penalty: length_penalty_a})
+        scores, = self.execute_op(self.op_trans_score, batches, length_penalty_a=length_penalty_a)
         return scores
 
 
     def translate_sentences(self, texts, beam_size=1, return_search_results=False, init_y_texts=None):
 
+        if not hasattr(self, 'op_beam_hypos_scores'):
+            # computation graph for beam search
+            with self.graph.as_default():
+                param = {'beam_size': tf.placeholder(tf.int32, [])}
+                self.op_beam_hypos_scores = self.make_op(
+                    self.fn_beam_search,
+                    self.default_phs,
+                    **param,
+                    param_phs = param)
+            
         # Translate
         batch_capacity = 5 * self.batch_capacity // beam_size
         if init_y_texts is None:
@@ -324,8 +356,7 @@ class Inference:
             init_y_texts = [header] * len(texts)
 
         batches = self.make_batches(texts, init_y_texts, batch_capacity)
-        candidates, scores = self.execute_op(self.op_beam_hypos_scores, batches, {self.ph_beam_size: beam_size})
-
+        candidates, scores = self.execute_op(self.op_beam_hypos_scores, batches, beam_size=beam_size)
 
         if return_search_results:
             nsamples = len(candidates)
