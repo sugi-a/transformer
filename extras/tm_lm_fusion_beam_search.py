@@ -566,4 +566,3 @@ def fusion_beam_search_delayed_pmi(get_logits_fn, init_cache, init_seq, beam_siz
 
     return seq, score
 
-
