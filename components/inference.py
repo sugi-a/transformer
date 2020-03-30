@@ -163,7 +163,7 @@ class Inference:
                 )
 
 
-    def fn_beam_search(self, inputs, beam_size):
+    def fn_beam_search(self, inputs, beam_size, length_penalty_a):
         (x, x_len), (init_y, init_y_len) = inputs
         beam_candidates, scores = self.model.decode_V2(
             x,
@@ -172,6 +172,7 @@ class Inference:
             init_y_len,
             beam_size = beam_size,
             return_search_results = True,
+            length_penalty_a = length_penalty_a,
             decode_config = self.decoding)
         return beam_candidates, scores
 
@@ -315,7 +316,7 @@ class Inference:
         return perp
 
 
-    def calculate_translation_score(self, sources, targets, length_penalty_a=None):
+    def calculate_translation_score(self, sources, targets, length_penalty_a=0):
         if not hasattr(self, 'op_trans_score'):
             # Computation graph for translation score
             with self.graph.as_default():
@@ -326,19 +327,19 @@ class Inference:
                     **params,
                     param_phs = params)
 
-        if length_penalty_a is None:
-            length_penalty_a = self.decoding['length_penalty_a']
         batches = self.make_batches(sources, targets)
         scores, = self.execute_op(self.op_trans_score, batches, length_penalty_a=length_penalty_a)
         return scores
 
 
-    def translate_sentences(self, texts, beam_size=1, return_search_results=False, init_y_texts=None):
+    def translate_sentences(self, texts, beam_size=1, length_penalty_a=0, return_search_results=False, init_y_texts=None):
 
         if not hasattr(self, 'op_beam_hypos_scores'):
             # computation graph for beam search
             with self.graph.as_default():
-                param = {'beam_size': tf.placeholder(tf.int32, [])}
+                param = {
+                    'beam_size': tf.placeholder(tf.int32, []),
+                    'length_penalty_a': tf.placeholder(tf.float64, [])}
                 self.op_beam_hypos_scores = self.make_op(
                     self.fn_beam_search,
                     self.default_phs,
@@ -356,7 +357,11 @@ class Inference:
             init_y_texts = [header] * len(texts)
 
         batches = self.make_batches(texts, init_y_texts, batch_capacity)
-        candidates, scores = self.execute_op(self.op_beam_hypos_scores, batches, beam_size=beam_size)
+        candidates, scores = self.execute_op(
+            self.op_beam_hypos_scores,
+            batches,
+            beam_size=beam_size,
+            length_penalty_a=length_penalty_a)
 
         if return_search_results:
             nsamples = len(candidates)

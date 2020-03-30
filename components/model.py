@@ -617,7 +617,7 @@ class Transformer(tf.layers.Layer):
             return top_seqs
 
 
-    def decode_V2(self, x, x_len, init_y, init_y_len, beam_size=8, return_search_results=False, decode_config=None):
+    def decode_V2(self, x, x_len, init_y, init_y_len, beam_size=8, return_search_results=False, length_penalty_a=0, decode_config=None):
         """`init_y` MUST have <eos> tokens at the tail,
             which are removed at the start of decoding."""
         assert self.built
@@ -638,6 +638,7 @@ class Transformer(tf.layers.Layer):
             self.params["vocab"]["EOS_ID"],
             self.params["vocab"]["PAD_ID"],
             offsets=offsets,
+            length_penalty_a=length_penalty_a,
             params=decode_config)
 
         # Remove offsets

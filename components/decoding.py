@@ -340,7 +340,7 @@ def beam_search_decode(get_logits_fn, init_cache, init_seq, init_seq_len, beam_s
     return seq, score
 
 
-def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlens, eos_id, pad_id=0, offsets=None, params=None, normalize_logits=True):
+def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlens, eos_id, pad_id=0, offsets=None, length_penalty_a=0, params=None, normalize_logits=True):
     """<sos> in `init_seq` is not removed."""
     NEG_INF = -1e9
 
@@ -384,8 +384,6 @@ def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlen
         return tf.tile(batch, tile)
 
     def get_score(log_prob, length):
-        length_penalty_a = params.get('length_penalty_a', 1.0)
-        logger.debug('length_penalty_a: {}'.format(length_penalty_a))
         return log_prob / length_penalty(length, length_penalty_a)
 
     def cond_fn(loop_vars):
