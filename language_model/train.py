@@ -12,7 +12,8 @@ from ..components import dataprocessing as dp
 from ..components.model import label_smoothing
 
 class Train:
-    def __init__(self, model_dir, n_gpus=1, n_cpu_cores=4, random_seed=0, n_accum=1):
+    def __init__(self, model_dir, n_gpus=1, n_cpu_cores=4, random_seed=0, n_accum=1,
+        reset_validation_score=False):
 
         # model's working directory
         self.model_dir = model_dir
@@ -30,6 +31,9 @@ class Train:
         self.n_cpu_cores = n_cpu_cores
         self.n_accum = n_accum
         self.random_seed = random_seed
+
+        # for fine-tuning
+        self.reset_validation_score = reset_validation_score
 
         # Log the config
         with open(self.logdir + '/config.json', 'w') as f:
@@ -410,16 +414,20 @@ class Train:
             if latest_checkpoint is None:
                 restorer = None; logger.debug('Checkpoint was not found.')
             else:
-                v_list, ignore = tf_restorable_vars(latest_checkpoint, unexist_ok=None)
+                v_list, ignore = tf_restorable_vars(
+                    latest_checkpoint,
+                    var_list=tf.global_variables() if not self.reset_validation_score
+                        else set(tf.global_variables()) - set(tf.global_variables(scope='validation_status')),
+                    unexist_ok=None)
                 restorer = tf.train.Saver(v_list, max_to_keep=1)
                 if len(ignore) > 0:
                     logger.info('Variables not restored: {}'.format(', '.join(v.op for v in ignore)))
                 logger.info('Restoring from: {}'.format(latest_checkpoint))
                 restorer.restore(sess, latest_checkpoint)
             # - periodic saver
-            saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)
+            saver = tf.train.Saver(tf.global_variables(), max_to_keep=self.params['train'].get('saver_max_to_keep', 1))
             # - max validation score saver
-            sup_saver = tf.train.Saver(tf.trainable_variables(), max_to_keep=1)
+            sup_saver = tf.train.Saver(tf.trainable_variables(), max_to_keep=self.params['train'].get('sup_saver_max_to_keep', 1))
 
             # step and epoch
             global_step = global_step_var.eval()
@@ -582,6 +590,7 @@ def main():
     parser.add_argument('--n_accumulation', '--n_accum', type=int, default=1)
     parser.add_argument('--random_seed', default=0, type=int)
     parser.add_argument('--check-train-data', action='store_true')
+    parser.add_argument('--reset_validation_score', action='store_true')
     args = parser.parse_args()
 
     if args.check_train_data:
@@ -592,7 +601,8 @@ def main():
             n_gpus = args.n_gpus,
             n_cpu_cores = args.n_cpu_cores,
             random_seed = args.random_seed,
-            n_accum = args.n_accumulation).train()
+            n_accum = args.n_accumulation,
+            reset_validation_score = args.reset_validation_score).train()
 
 if __name__ == '__main__':
     main()
