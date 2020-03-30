@@ -29,13 +29,13 @@ class PMIFusionDecoder(Inference):
         self.lmi.make_session(self.session, load_checkpoint=True)
 
 
-    def fn_fusion_decode(self, inputs, null_ctx, tm_eos, lm_eos, beam_size, delay):
+    def fn_fusion_decode(self, inputs, null_ctx, tm_eos, lm_eos, beam_size, delay, length_penalty_a):
         (x, x_len), (c, c_len) = inputs
-        hypos, scores = self.decode_fn(x, x_len, c, c_len, null_ctx, tm_eos, lm_eos, beam_size, delay)
+        hypos, scores = self.decode_fn(x, x_len, c, c_len, null_ctx, tm_eos, lm_eos, beam_size, delay, length_penalty_a)
         return hypos, scores
 
     
-    def fusion_decode(self, x, ctx, null_ctx, tm_eos, lm_eos, beam_size, ret_search_detail=False, delay=0):
+    def fusion_decode(self, x, ctx, null_ctx, tm_eos, lm_eos, beam_size, ret_search_detail=False, delay=0, length_penalty_a=0):
 
         if not hasattr(self, 'op_fusion_beam_search'):
             with self.graph.as_default():
@@ -44,7 +44,8 @@ class PMIFusionDecoder(Inference):
                     'tm_eos': tf.placeholder(tf.int32, []),
                     'lm_eos': tf.placeholder(tf.int32, []),
                     'beam_size': tf.placeholder(tf.int32, []),
-                    'delay': tf.placeholder(tf.int32, [])
+                    'delay': tf.placeholder(tf.int32, []),
+                    'length_penalty_a': tf.placeholder(tf.float64, [])
                 }
                 self.op_fusion_beam_search = self.make_op(
                     self.fn_fusion_decode,
@@ -64,7 +65,8 @@ class PMIFusionDecoder(Inference):
             tm_eos = self.vocab.tok2ID[tm_eos] if type(tm_eos) == str else tm_eos,
             lm_eos = self.vocab.tok2ID[lm_eos] if type(lm_eos) == str else lm_eos,
             beam_size = beam_size,
-            delay = delay)
+            delay = delay,
+            length_penalty_a = length_penalty_a)
 
         if ret_search_detail:
             # flatten 
@@ -84,7 +86,7 @@ class PMIFusionDecoder(Inference):
             return candidates
 
 
-    def decode_fn(self, x, x_len, ctx, ctx_len, null_ctx, tm_stop_token, lm_stop_token, beam_size, delay):
+    def decode_fn(self, x, x_len, ctx, ctx_len, null_ctx, tm_stop_token, lm_stop_token, beam_size, delay, length_penalty_a):
         """
             x: '<s> source sentence </s>' * batch_size
             ctx: '<s> context sentence <sep>' * batch_size
@@ -127,11 +129,11 @@ class PMIFusionDecoder(Inference):
         # [batch, delay, vocab].(replicated along axis=0 in the beam search function)
         # Initial value is 0 (flat pmi distribution)
         cache['pmi_q'] = tf.zeros(
-            [batch_size, delay, self.params['vocab']['vocab_size']],
+            [batch_size, tf.maximum(delay - 1, 0)],
             dtype = tf.float32)
 
         def __get_logits_fn(*args, **kwargs):
-            return self.__get_logits_fn(*args, **kwargs, tm_eos=tm_stop_token, lm_eos=lm_stop_token)
+            return self.__get_logits_fn_delay(*args, **kwargs, delay=delay, tm_eos=tm_stop_token, lm_eos=lm_stop_token)
 
         # Execute
         hypos, scores = fusion_beam_search_delayed_pmi_v2(
@@ -143,12 +145,13 @@ class PMIFusionDecoder(Inference):
             maxlens,
             eos_id = tm_stop_token,
             pad_id = self.vocab.PAD_ID,
+            length_penalty_a=length_penalty_a,
             normalize_logits = False)
         
         return hypos, scores
 
 
-    def __get_logits_fn(self, dec_inputs, cache, static_cache, _i, tm_eos, lm_eos):
+    def __get_logits_fn_delay(self, dec_inputs, cache, static_cache, _i, prev_pmi_chosen, delay, tm_eos, lm_eos):
         NEGINF = -1e10
         first_pos = tf.equal(0, _i)
         ctx_inputs, y_inputs = tf.cond(
@@ -177,12 +180,29 @@ class PMIFusionDecoder(Inference):
         ], axis=-1)
         pmi = pmi + tf.scatter_nd(indices, updates, tf.shape(pmi))
 
-        # push and pop
-        #pmi_q = tf.concat([cache['pmi_q'], pmi], axis=1)
-        #pmi, cache['pmi_q'] = pmi_q[:, :1], pmi_q[:, 1:]
+        # prev_chosen_pmi: [batch*beam]
+        # push [batch*beam, delay]
+        pmi_q = tf.concat([cache['pmi_q'], prev_pmi_chosen[:, None]], axis=1)
+        # pop [batch*beam], [batch*beam, delay - 1]
+        popped, cache['pmi_q'] = pmi_q[:, 0], pmi_q[:, 1:]
 
-        p_fusion = pTM + pmi
-        return p_fusion
+        # [batch*beam, 1, 1]
+        pmi_to_add = tf.cond(tf.equal(delay, 0), lambda: pmi, lambda: popped[:, None, None])
+
+        p_fusion = pTM + pmi_to_add
+
+        return p_fusion, pmi[:, 0]
+
+
+    def replace_logits(logits, index, values):
+        """
+        logits: [batch, length, vocab]
+        index: 0 <= index < vocab
+        values: [1 or batch, 1 or length]"""
+        
+        values = tf.broadcast_to(values, tf.shape(logits))
+        return tf.concat([logits[:, :, :index], values, logits[:, :, index+1:]], axis=2)
+
 
 
     def conditional_y_logits(self, y, y_len, c, c_len):
@@ -243,12 +263,11 @@ class PMIFusionDecoder(Inference):
             tf.cumsum(tm_logp_y, axis=1),
             tm_logp_y,
             tf.cumsum(pmi, axis=1),
-            pmi,
-            tm_in, tm_out, lm_in, lm_out
+            pmi, x, y, c, null_c
         )
 
 
-    def cumulative_scores(self, x, y, c, null_c, sos, tm_eos, lm_eos):
+    def cumulative_scores(self, x, y, c, null_c, sos, tm_eos, lm_eos, ret_input_info=False):
         if not hasattr(self, 'op_cumu_scores'):
             param_phs = {
                 'null_c': tf.placeholder(tf.int32, [None]),
@@ -274,12 +293,17 @@ class PMIFusionDecoder(Inference):
         c_data = dp.gen_line2IDs(c, self.vocab)
         data = zip(x_data, y_data, c_data)
         data = dp.gen_const_capacity_batch_multi_seq(data, self.batch_capacity)
-        return self.execute_op(self.op_cumu_scores,
+        ret = self.execute_op(self.op_cumu_scores,
             list(data),
             null_c = null_c,
             sos = sos,
             tm_eos = tm_eos,
             lm_eos = lm_eos)
+        
+        if ret_input_info:
+            return ret
+        else:
+            return ret[:-4]
     
     def cumulative_pmi(self, y, c):
         c = dp.gen_line2IDs(c, self.vocab)
@@ -326,73 +350,156 @@ def gen_docs(line_iter):
         yield doc
 
 
-def translate_documents_rerank(args):
-    decode_config = json.loads(args.decode_config) if args.decode_config is not None else None
-    if args.max_context_tokens is None and args.max_context_sents is None:
-        args.max_context_sents = 1
-    assert (args.max_context_sents is None) or (args.max_context_tokens is None)
-    
-    input_sents = sys.stdin.readlines()
-    docs = list(gen_docs(input_sents))
-    logger.info('#docs: {}, #sents: {}'.format(len(docs), len(input_sents) - len(docs)))
-
-    # Load translator
-    fdec = PMIFusionDecoder(
-        args.lm_dir, args.tm_dir,
-        lm_checkpoint=args.lm_checkpoint,
-        n_gpus=args.n_gpus, batch_capacity=args.batch_capacity,
-        decode_config=decode_config)
-    fdec.make_session()
+def fusion_rerank(docs, fdec, tm_sos, tm_eos, lm_sos, lm_sep, beam_size=1, length_penalty_a=0, context_limit=1, method='fusion_rerank'):
+    nsents = len(sum(docs, []))
+    logger.info('#docs: {}, #sents: {}'.format(len(docs), nsents))
 
     # Create N-best lists
     logger.debug('Creating n-best lists.')
-    hypo_docs = []
-    for doc in docs:
-        hypos, scores = fdec.translate_sentences(doc,
-            beam_size=args.beam_size,
-            return_search_results=True)
-        hypo_docs.append(hypos)
+
+    doc_offset = [0] + list(np.cumsum([len(v) for v in docs]))
+    flatten = sum(docs, [])
+    hypos, scores = fdec.translate_sentences(
+        flatten,
+        beam_size=beam_size,
+        length_penalty_a=length_penalty_a,
+        return_search_results=True)
+
+    # [doc, n_sents, hypos]
+    hypo_docs = [hypos[doc_offset[i]: doc_offset[i+1]] for i in range(len(docs))]
+
+    # transpose [sentId, docId, hypos]
+    maxsents = max(map(len, hypo_docs))
+    transposed = [[doc[i] for doc in hypo_docs if len(doc) > i] for i in range(maxsents)]
+    docIds = [[j for j, doc in enumerate(hypo_docs) if len(doc) > i] for i in range(maxsents)]
 
     # Rerank
     logger.debug('Reranking.')
-    trans_docs = []
-    for doc, hypos in zip(docs, hypo_docs):
-        ctx_q = deque()
-        trans = []
-        for x, nbest in zip(doc, hypos):
-            ctx_tiled = [' '.join(ctx_q)] * args.beam_size
-            x_tiled = [x] * args.beam_size
 
-            if args.method == 'pmi_rerank':
-                scores = fdec.lmi.calculate_pmi(ctx_tiled, nbest)
-            elif args.method == 'fusion_rerank':
-                scores = fdec.calculate_trans_score_w_context(x_tiled, nbest, ctx_tiled)
-            else:
-                raise
+    # Context queue
+    ctx_qs = [deque() for i in range(len(hypo_docs))]
 
-            out = nbest[np.argmax(scores)]
-            trans.append(out)
+    # translations
+    trans_docs = [[] for i in range(len(docs))]
+
+    for sentId, (sents, ids) in enumerate(zip(transposed, docIds)):
+        # sents: [docIndex, hypos]
+        if sentId == 0:
+            out = [v[0] for v in sents]
+        else:
+            # [docIndex, hypos]
+            ctx_tiled = [[' {} '.format(lm_sep).join(ctx_qs[i])] * beam_size for i in ids]
+            x_tiled = [[docs[i][sentId]] * beam_size for i in ids]
+            n_best_wrapped_lm = [['{} {}'.format(line, lm_sep) for line in nbest] for nbest in sents]
+            n_best_wrapped_tm = [['{} {} {}'.format(tm_sos, line, tm_eos) for line in nbest] for nbest in sents]
+
+            if method == 'fusion_rerank':
+                scores = np.array(fdec.lmi.calculate_pmi(
+                    sum(ctx_tiled, []),
+                    sum(n_best_wrapped_lm, []),
+                    sep=lm_sep,
+                    head=lm_sos))
+                scores += np.array(fdec.calculate_translation_score(
+                    sum(x_tiled, []),
+                    sum(n_best_wrapped_tm, []),
+                    length_penalty_a=length_penalty_a))
+                scores = scores.reshape([-1, beam_size])
+                top1Indices = np.argmax(scores, axis=1)
+                out = [v[i] for v,i in zip(sents, top1Indices)]
+        for i, o in zip(ids, out):
+            trans_docs[i].append(o)
+
+            ctx_qs[i].append(o)
+            if len(ctx_qs[i]) > context_limit:
+                ctx_qs[i].popleft()
+
+    return trans_docs
+
+
+def successively_translate(sents, fdec, tm_sos, tm_eos, lm_sos, lm_sep, beam_size=1, delay=0, length_penalty_a=0, context_limit_type='sentence', context_limit=1, trans_log=None):
+    docs = list(gen_docs(sents))
+    logger.info('#docs: {}, #sents: {}'.format(len(docs), len(sents) - len(docs)))
+
+    # time_aligned [max_doc_len , ndocs(var), 2] (conteporaries)
+    max_doc_len = max(len(doc) for doc in docs)
+    time_aligned = [[(doc[i], doci) for doci, doc in enumerate(docs) if len(doc) > i] for i in range(max_doc_len)]
+    
+    # [ndocs, n_past_sents(at most max_context_sents)]
+    contexts = [deque() for i in range(len(docs))]
+    translations = [[] for i in range(len(docs))]
+
+    null_ctx = lm_sos + ' ' + lm_sep
+    # Translate
+    _count = 0
+    _start_t = time.time()
+    for a in time_aligned:
+        lines, doc_inds = zip(*a)
+        ctx = [lm_sos + ' ' + ' '.join(contexts[i])  + ' ' + lm_sep for i in doc_inds]
+
+        outs = fdec.fusion_decode(
+            lines,
+            ctx,
+            null_ctx = null_ctx,
+            tm_eos = tm_eos,
+            lm_eos = lm_sep,
+            beam_size = beam_size,
+            delay = delay,
+            length_penalty_a = length_penalty_a)
+
+        if trans_log is not None:
+            trans_log.extend(zip(lines, ctx, outs))
+
+        _count += len(outs)
+        logger.debug('Translated {}/{}. {} s/sentence'.format(
+            _count, len(sents) - len(docs), (time.time() - _start_t)/_count))
+
+        for i, out in zip(doc_inds, outs):
+            # Store translations
+            translations[i].append(out)
 
             # Update context queue
-            if args.max_context_sents is not None:
-                ctx_q.append(out)
-                if len(ctx_q) > args.max_context_sents:
-                    ctx_q.popleft()
+            if context_limit_type == 'sentence':
+                contexts[i].append(lm_sep + ' ' + out)
+                if len(contexts[i]) > context_limit:
+                    contexts[i].popleft()
+            elif context_limit_type == 'token':
+                contexts[i].append(lm_sep)
+                contexts[i].extend(out.split())
+                while len(contexts[i]) > context_limit:
+                    contexts[i].popleft()
             else:
-                for tok in out.split():
-                    ctx_q.append(tok)
-                while len(ctx_q) > args.max_context_tokens:
-                    ctx_q.popleft()
+                raise ValueError
 
-        trans_docs.append(trans)
+    return translations
 
-    # Output
-    for doc in trans_docs:
-        for line in doc:
-            print(line)
-        print('')
+def translate_with_context(x_docs, y_docs, fdec, tm_sos, tm_eos, lm_sos, lm_sep, beam_size=1, delay=0, length_penalty_a=0, context_limit=1, return_x_c=False):
 
-
+    x, c = [], []
+    for x_doc, y_doc in zip(x_docs, y_docs):
+        x.extend(x_doc)
+        c.extend([
+            '{} {} {}'.format(
+                lm_sos,
+                ' '.join([lm_sep + ' ' + line for line in y_doc[max(0, i-context_limit): i]]),
+                lm_sep)
+            for i in range(len(y_doc))])
+    logger.info('Number of sents.: {}'.format(len(x)))
+    logger.debug('{}\n{}'.format(x[:5], c[:5]))
+    
+    null_ctx = '{} {}'.format(lm_sos, lm_sep)
+    trans = fdec.fusion_decode(
+        x, c,
+        null_ctx = null_ctx,
+        tm_eos = tm_eos,
+        lm_eos = lm_sep,
+        beam_size = beam_size,
+        delay = delay,
+        length_penalty_a = length_penalty_a)
+    
+    if return_x_c:
+        return trans, x, c
+    else:
+        return trans
 
 def translate_documents(args):
     decode_config = json.loads(args.decode_config) if args.decode_config is not None else None

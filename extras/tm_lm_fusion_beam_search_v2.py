@@ -18,7 +18,7 @@ def fusion_beam_search_delayed_pmi_v2(
     eos_id,
     pad_id=0,
     offsets=None,
-    params=None,
+    length_penalty_a=0,
     normalize_logits=True):
     """<sos> in `init_seq` is not removed."""
     NEG_INF = -1e9
@@ -28,7 +28,6 @@ def fusion_beam_search_delayed_pmi_v2(
     if eos_id is None:
         eos_id = pad_id
 
-    params = params or {}
     
     with tf.name_scope('batch_size'):
         batch_size = tf.shape(nest.flatten(init_cache)[0])[0]
@@ -63,8 +62,6 @@ def fusion_beam_search_delayed_pmi_v2(
         return tf.tile(batch, tile)
 
     def get_score(log_prob, length):
-        length_penalty_a = params.get('length_penalty_a', 1.0)
-        logger.debug('length_penalty_a: {}'.format(length_penalty_a))
         return log_prob / length_penalty(length, length_penalty_a)
 
     def cond_fn(loop_vars, _i):
@@ -92,82 +89,53 @@ def fusion_beam_search_delayed_pmi_v2(
             with tf.name_scope('get_logits_and_update_layer_cache'):
                 # Note: the outputs' length can be >1 because of the initial target-side context
                 # so take THE LAST LOGIT. [bat * beam, out_len, vocab]->[bat * beam, vocab]
-                logits = get_logits_fn(flat_dec_inputs, flat_cache, static_flat_cache, _i)[:,-1] 
+                logits, pmi_choice = get_logits_fn(
+                    flat_dec_inputs,
+                    flat_cache,
+                    static_flat_cache,
+                    _i,
+                    loop_vars['prev_pmi_chosen'])
+                logits = logits[:, -1]
+                vocab_size = tf.shape(logits)[1]
+                if normalize_logits:
+                    logits = tf.math.log_softmax(logits)
 
-            # restore shape of cache. ->[bat_size, beam_size, ...]
-            with tf.name_scope('update_and_restore_structure_of_cache'):
+            with tf.name_scope('update_cache'):
                 loop_vars['cache'] = nest.map_structure(pack, flat_cache)
 
-            with tf.name_scope('preliminary_top_ids_and_log_probs'):
-                # get the top k=beam_size for each sequence.
-                # top_logits: [bat * beam, beam], ids: [bat * beam, beam]
-                # There are some strategies to choose k=beam words from [bat * beam, vocab]
-                sampling_method = params.get('sampling_method', None)
-                if sampling_method is None or sampling_method == BeamSearchKeys["KEY_TOPK"]:
-                    # Normal top-k selection
-                    top_logits, ids = tf.math.top_k(logits, beam_size, False, name='pre_tops') 
-                elif sampling_method == BeamSearchKeys["KEY_SAMPLING"]:
-                    # Random sampling based on probability distribution
-                    ids = tf.random.multinomial(logits, beam_size) # [bat*beam, beam]
-                    ids = tf.cast(ids, tf.int32)
-                    top_logits = tf.batch_gather(logits, ids) # [bat*beam, beam]
-                elif sampling_method == BeamSearchKeys["KEY_DIVERSE_BEAM_SEARCH"]:
-                    # [Li+ 2016] "A simple, fast diverse decoding algorithm" with
-                    # a fixed diversity rate.
-                    top_logits, ids = tf.math.top_k(logits, beam_size, False, name='pre_tops') 
-                    diversify_bias = tf.cast(tf.range(beam_size), tf.float32) * params["diversity_rate"]
-                    top_logits = tf.cond(
-                        tf.equal(tf.shape(loop_vars['generated_seq'])[2], 0),
-                        lambda: top_logits,
-                        lambda: top_logits - diversify_bias[None])
-                else:
-                    assert False
-
-                # get the log probabilities ->[bat * beam, beam] 
-                if normalize_logits:
-                    with tf.name_scope('logits_to_log_prob'):
-                        log_prob = top_logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True) 
-                else:
-                    log_prob = top_logits
-
-                # Arrange shape of log_prob and ids
-                with tf.name_scope('restore_shape'):
-                    # log prob. [bat * beam, beam]->[bat, old_beam * new_beam]
-                    log_prob = tf.reshape(log_prob, [batch_size, beam_size ** 2]) 
-
-                    # IDs [bat * beam, beam]->[bat, old_beam * new_beam]
-                    ids = tf.reshape(ids, [batch_size, beam_size ** 2])
-
-                # Sequence score
-                with tf.name_scope('seq_score'):
-                    # Fork log probability of sequences. [bat_size, beam * beam]. 
-                    forked_seqp = fork(loop_vars['seq_log_prob'])
-                    forked_score = fork(loop_vars['score'])
-
-                    # Fork the info of closed paths. [bat, beam]->[bat, beam * beam]
-                    forked_ended = fork(loop_vars['has_eos'])
-
-                    # Update sequence log probability [bat, old_beam * new_beam]
-                    forked_seqp = forked_seqp + tf.where(forked_ended, eos_mask, log_prob)
-
-                    # Update sequence score [bat, old_beam * new_beam]
-                    forked_score = tf.where(forked_ended, forked_score + eos_mask,
-                        get_score(forked_seqp, cur_pos[:, None] + 1))
 
             with tf.name_scope('get_top_k'):
-                # Top k=beam [bat, beam]
-                top_score, top_ind = tf.math.top_k(forked_score, beam_size, False)
+                # [bat*beam, vocab] -> [bat, beam, vocab]
+                logits = tf.reshape(logits, [batch_size, beam_size, -1])
 
-                # In this top-k selection, you choose top-k=beam paths out of beam^2 paths,
-                # which are the new preliminary top paths (PTP).
-                # Old beam indicator [bat, old_beam * new_beam] maps an index in PTP to
-                # the index of the path's old beam.
-                old_beam_i = tf.range(beam_size)[None, :, None]
-                old_beam_i = tf.tile(old_beam_i, [batch_size, 1, beam_size])
-                old_beam_i = tf.reshape(old_beam_i, [batch_size, beam_size * beam_size])
+                # [bat, beam, vocab]
+                eos_bias = tf.broadcast_to(
+                    tf.concat([[0], tf.fill([vocab_size - 1], NEG_INF)], axis=0)[None, None],
+                    tf.shape(logits))
+                # [bat, beam, vocab]
+                has_eos = tf.broadcast_to(loop_vars['has_eos'][:, :, None], tf.shape(logits))
 
-                # old beam indices [bat, beam]
-                old_beam_ind = tf.batch_gather(old_beam_i, top_ind)
+                # [bat, beam, 1] + [bat, beam, vocab] -> [bat, beam, vocab]
+                seq_logp = loop_vars['seq_log_prob'][:,:, None] + tf.where(
+                    has_eos,
+                    eos_bias,
+                    logits)
+
+                seq_score = tf.where(
+                    has_eos,
+                    loop_vars['score'][:, :, None] + eos_bias,
+                    get_score(seq_logp, cur_pos[:, None, None] + 1))
+
+                # [bat, beam, vocab] -> [bat, beam*vocab]
+                seq_score = tf.reshape(seq_score, [batch_size, -1])
+                # [bat, beam]
+                top_score, top_ind = tf.math.top_k(seq_score, beam_size, False)
+
+                # [bat, beam]
+                old_beam_ind = tf.math.floordiv(top_ind, vocab_size)
+                pred = tf.floormod(top_ind, vocab_size)
+
+
                 
             with tf.name_scope('update_loop_vars'):
                 new_vars = {}
@@ -177,10 +145,14 @@ def fusion_beam_search_delayed_pmi_v2(
                     tf.batch_gather(x, old_beam_ind), loop_vars['cache'])
 
                 # UPDATE log_probs [bat, beam]
-                new_vars['seq_log_prob'] = tf.batch_gather(forked_seqp, top_ind)
+                new_vars['seq_log_prob'] = tf.batch_gather(tf.reshape(seq_logp, [batch_size, -1]), top_ind)
 
                 # UPDATE score [bat, beam]
                 new_vars['score'] = top_score
+
+                new_vars['prev_pmi_chosen'] = tf.reshape(tf.batch_gather(
+                    tf.reshape(pmi_choice, [batch_size, -1]),
+                    top_ind), [-1])
                 
                 # UPDATE `generated_seq`
                 # Choosing old branch. [bat, beam, ...]->[bat, beam, len]
@@ -193,9 +165,6 @@ def fusion_beam_search_delayed_pmi_v2(
                 # If the sequence length reaches the limit, EOS must come.
                 stopping = tf.tile(tf.greater(cur_pos + 2, maxlens)[:, None], [1,beam_size])
                 eos_tok = tf.fill([batch_size, beam_size], eos_id)
-
-                # Predicted tokens
-                pred = tf.batch_gather(ids, top_ind) # [batch, beam]
 
                 # New token to be added
                 new_tok = tf.where(old_ended, pad_tok, tf.where(stopping, eos_tok, pred))
@@ -238,7 +207,8 @@ def fusion_beam_search_delayed_pmi_v2(
             'score': tf.concat([tf.zeros([batch_size, 1]),
                 tf.fill([batch_size, beam_size - 1], NEG_INF)], axis=1),
             'has_eos': tf.zeros([batch_size, beam_size], dtype=tf.bool),
-            'dec_inputs': init_seq
+            'dec_inputs': init_seq,
+            'prev_pmi_chosen': tf.zeros([batch_size* beam_size])
         }
 
     static_flat_cache = nest.map_structure(lambda x: flatten(fork(x[:, None])), static_cache)
@@ -251,7 +221,8 @@ def fusion_beam_search_delayed_pmi_v2(
             'seq_log_prob': tf.TensorShape([None, None]),
             'has_eos': tf.TensorShape([None, None]),
             'score': tf.TensorShape([None, None]),
-            'dec_inputs': tf.TensorShape([None, None, None])
+            'dec_inputs': tf.TensorShape([None, None, None]),
+            'prev_pmi_chosen': tf.TensorShape([None])
         }, tf.TensorShape([])]
 
     max_iter = tf.cond(tf.equal(batch_size, 0), lambda: -1, lambda: maxlen)
