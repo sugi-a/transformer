@@ -81,6 +81,17 @@ class Inference(MTInference):
         return [perp]
 
 
+    def fn_token_log_probs(self, inputs):
+        x, x_len = inputs
+        x_in, x_out = x[:, :-1], x[:, 1:]
+        io_len = x_len - 1
+        logits = self.model.get_logits(x_in, training=False)
+        logits = tf.math.log_softmax(logits)
+        log_prob = tf.batch_gather(logits, x_out[:, :, None])[:, :, 0]
+        log_prob *= tf.sequence_mask(io_len, tf.shape(x_out)[1], dtype=tf.float32)
+        return [log_prob]
+
+
     def fn_log_prob(self, inputs):
         (x, x_len) = inputs
         x_in, x_out = x[:, :-1], x[:, 1:]
@@ -216,6 +227,14 @@ class Inference(MTInference):
         probs = self.calculate_cond_log_prob(c + null_c, x + x)
         probs = np.array(probs)
         return probs[:n] - probs[n:]
+
+
+    def calculate_token_logp(self, x):
+        if not hasattr(self, 'op_calc_token_logp'):
+            self.op_calc_token_logp = self.make_op(self.fn_token_log_probs, self.default_phs)
+        batches = self.make_batches(x)
+        token_logp, = self.execute_op(self.op_calc_token_logp, batches)
+        return token_logp
 
 
 def main():
