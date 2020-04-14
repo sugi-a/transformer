@@ -1,4 +1,4 @@
-import argparse, sys, os, time, json
+import argparse, sys, os, time, json, itertools, functools
 import tensorflow as tf
 from tensorflow.contrib.framework import nest
 import numpy as np
@@ -231,14 +231,19 @@ class Inference:
 
     def execute_op_iter(self, op, batches_iter, **feeds):
         assert self.session
-
-        for batch in batches_iter:
-            feed_dict = op.make_feed_dict(batch, feed)
-            
-            res = self.session.run(op.op, feed_dict=feed_dict)
+        for res in self.execute_op_batch_iter(op, batches_iter, **feeds):
             for bat_res in res:
                 for items in zip(*bat_res):
                     yield items
+
+
+    def execute_op_batch_iter(self, op, batches, **feeds):
+        for batch in batches:
+            feed_dict = op.make_feed_dict(batch, feeds)
+            res = self.session.run(op.op, feed_dict=feed_dict)
+            yield nest.map_structure(
+                lambda *x: list(itertools.chain.from_iterable(map(lambda v:v.tolist(), x))),
+                *res)
 
         
     def execute_op(self, op, batches, **feeds):
@@ -253,35 +258,43 @@ class Inference:
         
         run_results = []
         start_time = time.time()
-        sys.stderr.write('{} steps\r'.format(len(batches)))
-        sys.stderr.flush()
+        if hasattr(batches, '__len__'):
+            sys.stderr.write('{} steps\r'.format(len(batches)))
+            sys.stderr.flush()
+
         for i, batch in enumerate(batches):
             # feed_dict
             feed_dict = op.make_feed_dict(batch, feeds)
-
             run_results.extend(self.session.run(op.op, feed_dict=feed_dict))
-            sys.stderr.write('{:5.3f} sec/step, steps: {:4}/{:4}\t\r'.format(
-                (time.time() - start_time)/(i + 1), i+1, len(batches)))
-            sys.stderr.flush()
 
-        return [sum((x.tolist() for x in items), []) for items in zip(*run_results)]
+            if hasattr(batches, '__len__'):
+                sys.stderr.write('{:8.3f} sec/step, steps: {:8}/{:8}\t\r'.format(
+                    (time.time() - start_time)/(i + 1), i+1, len(batches)))
+                sys.stderr.flush()
+            else:
+                sys.stderr.write('{:8.3f} sec/step\r'.format((time.time() - start_time)/(i+1)))
+
+        return nest.map_structure(
+            lambda *x: list(itertools.chain(*map(lambda v:v.tolist(), x))),
+            *run_results)
 
 
     def make_session(self, sess=None, load_checkpoint=None):
-        assert self.session is None
-        if sess is not None:
-            assert sess.graph is self.graph
-            self.session = sess
-            if load_checkpoint:
-                saver = tf.train.Saver(tf.global_variables(self.model.scope_name))
-                saver.restore(self.session, self.checkpoint)
-        else:
-            with self.graph.as_default():
-                session_config = tf.ConfigProto()
-                session_config.allow_soft_placement = True
-                self.session = tf.Session(config=session_config, graph=self.graph)
-                saver = tf.train.Saver(tf.global_variables(self.model.scope_name))
-                saver.restore(self.session, self.checkpoint)
+        with self.graph.as_default():
+            assert self.session is None
+            if sess is not None:
+                assert sess.graph is self.graph
+                self.session = sess
+                if load_checkpoint:
+                    saver = tf.train.Saver(tf.global_variables(self.model.scope_name))
+                    saver.restore(self.session, self.checkpoint)
+            else:
+                with self.graph.as_default():
+                    session_config = tf.ConfigProto()
+                    session_config.allow_soft_placement = True
+                    self.session = tf.Session(config=session_config, graph=self.graph)
+                    saver = tf.train.Saver(tf.global_variables(self.model.scope_name))
+                    saver.restore(self.session, self.checkpoint)
 
     
     def make_batches(self, *args, **kwargs):
