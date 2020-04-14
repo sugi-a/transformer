@@ -8,6 +8,7 @@ from .language_model import DecoderLanguageModel, load_model_config
 from ..components.utils import *
 from ..components import dataprocessing as dp
 from ..components.inference import Inference as MTInference
+from ..components.model import align_to_right
 
 class Inference(MTInference):
     def __init__(self, model_dir, model=None, graph=None, checkpoint=None, n_gpus=1, n_cpu_cores=4, batch_capacity=None):
@@ -107,7 +108,7 @@ class Inference(MTInference):
         return [seq_log_prob]
 
 
-    def fn_cond_log_prob(self, inputs):
+    def fn_cond_seq_logp(self, inputs):
         (x, x_len), (c, c_len) = inputs
         mcl, mxl = tf.shape(c)[1], tf.shape(x)[1]
         ids = tf.range(mcl + mxl)[None] + (
@@ -126,13 +127,29 @@ class Inference(MTInference):
         seq_log_prob = tf.reduce_sum(log_prob * is_target, axis=1)
         return [seq_log_prob]
 
+    def fn_cond_tok_logp_dist(self, inputs):
+        """
+        output length: x_len
+            """
+        (x, x_len), (c, c_len) = inputs
+        c_r, offsets = align_to_right(c, c_len)
+        joint = tf.concat([c_r, x[:,:-1]], axis=1)
+        # [batch, c_len + x_len - 1, V]
+        logits = self.model.get_logits(joint, training=False, offsets=offsets)
+        # [batch, x_len, V]
+        logits = logits[:, tf.shape(c_r)[1] - 1:]
+        # [batch, x_len, V]
+        logp = tf.math.log_softmax(logits)
+
+        return [logp]
+
 
     def make_feed_dict(self, batch):
         return {self.ph_dict['x']: batch[0],
                     self.ph_dict['x_len']: batch[1]}
 
 
-    def make_batches_iter(self, x, batch_capacity=None, header=True, footer=True):
+    def make_batches_iter(self, x, batch_capacity=None):
         batch_capacity = batch_capacity or self.batch_capacity
 
         IDs = dp.gen_line2IDs(x, self.vocab)
@@ -188,7 +205,7 @@ class Inference(MTInference):
                     (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None])),
                     (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None]))
                     )
-                self.op_c_log_prob = self.make_op(self.fn_cond_log_prob, phs)
+                self.op_c_log_prob = self.make_op(self.fn_cond_seq_logp, phs)
         batches = list(self.make_multi_sentence_batch_gen(zip(x, c)))
         logprob, = self.execute_op(self.op_c_log_prob, batches)
         return logprob
