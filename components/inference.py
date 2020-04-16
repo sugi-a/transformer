@@ -213,20 +213,22 @@ class Inference:
         
         return [score]
 
-    def make_op(self, fn, data_phs, *args, param_phs=None, **kwargs):
+    def make_op(self, fn, data_phs, **placeholders):
         """Create operation which computes the function specified with GPU(s) in parallel.
         Args:
             fn:
-                Args: inputs = ((x, x_len), (y, y_len))
-                Returns: tuple or list (ret1, ret2, ...). ret: [BATCH_SIZE, ...]
+                Args:
+                    inputs: shape ((x, x_len), (y, y_len))
+                    **placeholders
+                Returns: tuple or list (ret1, ret2, ...). ret_i: [BATCH_SIZE, ...]
         Returns:
             list of replicated operations to be computed in parallel.
             """
 
         with self.graph.as_default():
             parallel_inputs = non_even_split(data_phs, self.n_gpus)
-            op_fn = lambda: compute_parallel(fn, parallel_inputs, *args, **kwargs)
-            return OperationWithPlaceholderFeed(op_fn, data_phs, param_phs=param_phs)
+            op_fn = lambda: compute_parallel(fn, parallel_inputs, **placeholders)
+            return OperationWithPlaceholderFeed(op_fn, data_phs, placeholders)
 
 
     def execute_op_iter(self, op, batches_iter, **feeds):
@@ -333,12 +335,10 @@ class Inference:
         if not hasattr(self, 'op_trans_score'):
             # Computation graph for translation score
             with self.graph.as_default():
-                params = {'length_penalty_a': tf.placeholder(tf.float64, [])}
                 self.op_trans_score = self.make_op(
                     self.fn_translation_score,
                     self.default_phs,
-                    **params,
-                    param_phs = params)
+                    length_penalty_a=tf.placeholder(tf.float64, []))
 
         batches = self.make_batches(sources, targets)
         scores, = self.execute_op(self.op_trans_score, batches, length_penalty_a=length_penalty_a)
@@ -350,15 +350,11 @@ class Inference:
         if not hasattr(self, 'op_beam_hypos_scores'):
             # computation graph for beam search
             with self.graph.as_default():
-                param = {
-                    'beam_size': tf.placeholder(tf.int32, []),
-                    'length_penalty_a': tf.placeholder(tf.float64, [])}
                 self.op_beam_hypos_scores = self.make_op(
                     self.fn_beam_search,
                     self.default_phs,
-                    **param,
-                    param_phs = param)
-            
+                    beam_size=tf.placeholder(tf.int32, []),
+                    length_penalty_a=tf.placeholder(tf.float64, [])) 
         # Translate
         batch_capacity = 5 * self.batch_capacity // beam_size
         if init_y_texts is None:
