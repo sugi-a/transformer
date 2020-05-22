@@ -411,7 +411,7 @@ class Decoder(tf.layers.Layer):
         return tf.shape(cache_l0_v)[1]
 
 
-    def call(self, inputs, self_attn_bias, context=None, ctx_attn_bias=None, cache=None, training=False, offsets=None):
+    def call(self, inputs, self_attn_bias, context=None, ctx_attn_bias=None, cache=None, training=False, offsets=None, embedding=False):
         assert (context is None) == (ctx_attn_bias is None) == (not self.context)
         if cache is None: cache = {}
 
@@ -484,7 +484,8 @@ class Decoder(tf.layers.Layer):
             outputs = ff(outputs, training=training)
         
         outputs = self.output_norm(outputs)
-        outputs = self.embedding_layer.emb2logits(outputs)
+        if not embedding:
+            outputs = self.embedding_layer.emb2logits(outputs)
         return outputs
 
 
@@ -577,6 +578,19 @@ class Transformer(tf.layers.Layer):
         cache = self.make_cache(x, x_len, training, layer_cache=False, offsets=offsets)
 
         return self.get_logits_w_cache(y, cache, training=training)
+
+
+    def get_decoder_output(self, x, y, x_len, y_len, training=False, offsets=None):
+        cache = self.make_cache(x, x_len, training, layer_cache=False, offsets=offsets)
+        return self.decoder(
+            y,
+            self.triangle_bias,
+            context=cache['enc_outputs'],
+            ctx_attn_bias=cache['ctx_attn_bias'],
+            cache=cache,
+            training=training,
+            offsets=cache.get('offsets', None),
+            embedding=True)
 
 
     def decode(self, x, x_len, init_y, init_y_len, beam_size=8, return_search_results=False, decode_config=None):
