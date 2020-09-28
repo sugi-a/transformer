@@ -622,3 +622,66 @@ def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlen
 
     return seq, score
 
+
+def force_decoding(get_logits_fn, init_cache, seq):
+    def get_shape_keep_last_dim(x):
+        orig_shape = x.shape.as_list()
+        shape = [None] * len(orig_shape)
+        shape[-1] = orig_shape[-1]
+        return tf.TensorShape(shape)
+
+    def body_fn(count, cache, scores, ranks):
+        # [B, 1]
+        dec_input = seq[:, count:count+1]
+        # [B, V]
+        logits = get_logits_fn(count, dec_input, cache)[:, -1]
+
+        # [B]
+        ref = seq[:, count+1]
+
+        # [B, 1]
+        score = tf.batch_gather(logits, ref[:, None])
+        # [B, count] (+) [B, 1] -> [B, count+1]
+        scores = tf.concat([scores, score], axis=-1)
+
+        # [B, V]
+        rank = tf.greater_equal(logits, score)
+        # [B, 1]
+        rank = tf.reduce_sum(tf.cast(rank, tf.int32), axis=1, keepdims=True) - 1
+        # [B, count] (+) [B, 1] -> [B, count+1]
+        ranks = tf.concat([ranks, rank], axis=-1)
+
+        return count+1, cache, scores, ranks
+        
+    def cond_fn(count, cache, scores, ranks):
+        return tf.less_equal(count, tf.shape(seq)[1] - 2)
+
+    
+    B = tf.shape(seq)[0]
+
+    init_loop_vars = [
+        tf.zeros([], tf.int32), # counter
+        init_cache, # cache
+        tf.zeros([B, 0], tf.float32), # scores
+        tf.zeros([B, 0], tf.int32) # ranks
+    ]
+
+    shape_invariants = [
+        tf.TensorShape([]),
+        nest.map_structure(get_shape_keep_last_dim, init_cache),
+        tf.TensorShape([None, None]),
+        tf.TensorShape([None, None])
+    ]
+
+    _, _, scores, ranks = tf.while_loop(
+        cond_fn,
+        body_fn,
+        init_loop_vars,
+        shape_invariants,
+        back_prop=False,
+        parallel_iterations=1
+        )
+
+    
+    # scores: [B, T-1], ranks: [B, T-1]
+    return scores, ranks

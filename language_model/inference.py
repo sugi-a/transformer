@@ -108,7 +108,13 @@ class Inference(MTInference):
         return [seq_log_prob]
 
 
-    def fn_cond_seq_logp(self, inputs):
+    def add_a_smoothing(self, logp, a):
+        p = tf.exp(logp) # [B, T, V]
+        p += a / tf.cast(tf.shape(p)[-1], tf.float32)
+        p /= tf.reduce_sum(p, axis=-1, keepdims=True)
+        return tf.log(p)
+
+    def fn_cond_seq_logp(self, inputs, alpha, T=1.0):
         (x, x_len), (c, c_len) = inputs
         mcl, mxl = tf.shape(c)[1], tf.shape(x)[1]
         ids = tf.range(mcl + mxl)[None] + (
@@ -123,6 +129,13 @@ class Inference(MTInference):
             ) - tf.sequence_mask(c_len - 1, tf.shape(j_in)[1], dtype=tf.float32)
 
         log_prob_dist = tf.math.log_softmax(logits, axis=-1)
+
+        # Add-a smoothing
+        log_prob_dist = self.add_a_smoothing(log_prob_dist, alpha)
+
+        # T scaling
+        log_prob_dist = tf.math.log_softmax(T * log_prob_dist)
+
         log_prob = tf.batch_gather(log_prob_dist, j_out[:,:, None])[:, :, 0]
         seq_log_prob = tf.reduce_sum(log_prob * is_target, axis=1)
         return [seq_log_prob]
@@ -198,20 +211,22 @@ class Inference(MTInference):
         return logprob
 
 
-    def calculate_cond_log_prob(self, c, x):
+    def calculate_cond_log_prob(self, c, x, alpha=0, T=1.0):
         if not hasattr(self, 'op_c_log_prob'):
             with self.graph.as_default():
                 phs = (
                     (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None])),
                     (tf.placeholder(tf.int32, [None, None]), tf.placeholder(tf.int32, [None]))
                     )
-                self.op_c_log_prob = self.make_op(self.fn_cond_seq_logp, phs)
+                ph_a = tf.placeholder(tf.float32, [])
+                ph_T = tf.placeholder(tf.float32, [])
+                self.op_c_log_prob = self.make_op(self.fn_cond_seq_logp, phs, alpha=ph_a, T=ph_T)
         batches = list(self.make_multi_sentence_batch_gen(zip(x, c)))
-        logprob, = self.execute_op(self.op_c_log_prob, batches)
+        logprob, = self.execute_op(self.op_c_log_prob, batches, alpha=alpha, T=T)
         return logprob
 
 
-    def calculate_pmi(self, c, x, sep=None, head=None):
+    def calculate_pmi(self, c, x, sep=None, head=None, alpha=0, T=1.0):
         """PMI(c, x; head, sep)
         = log p(x | head c sep) - log p(x | head sep)
         = log p(c sep x | head) - log p(c sep | head) - log p(sep x | head) + log p(sep | head)"""
@@ -230,7 +245,7 @@ class Inference(MTInference):
         probs = self.calculate_cond_log_prob(
             ['{} {} {}'.format(_h, _c, _s) for _h, _c, _s in zip(head, c, sep)] +
             ['{} {}'.format(_h, _s) for _h, _s in zip(head, sep)],
-            x + x)
+            x + x, alpha=alpha, T=T)
         probs = np.array(probs)
         return probs[:n] - probs[n:n*2]
 

@@ -1,0 +1,100 @@
+1,11c1
+< import sys, os, argparse, time, json
+< from logging import basicConfig, getLogger, INFO, DEBUG; logger = getLogger()
+< from collections import deque
+< import tensorflow as tf
+< import numpy as np
+< 
+< from tensorflow.contrib.framework import nest
+< 
+< from ..components.decoding import length_penalty
+< 
+< def fusion_beam_search(get_logits_fn, init_cache, init_seq, beam_size, maxlens, eos_id, pad_id=0, offsets=None, params=None):
+---
+> def beam_search_decode_V2(get_logits_fn, init_cache, init_seq, beam_size, maxlens, eos_id, pad_id=0, offsets=None, params=None, normalize_logits=True):
+55a46
+>         logger.debug('length_penalty_a: {}'.format(length_penalty_a))
+83c74
+<                 logits, y_logits, cy_logits = (_[:,-1] for _ in get_logits_fn(flat_dec_inputs, flat_cache))
+---
+>                 logits = get_logits_fn(flat_dec_inputs, flat_cache)[:,-1] 
+92,97c83,110
+<                 top_logits, ids = tf.math.top_k(logits, beam_size, False)
+<                 top_mt_y_logits = tf.batch_gather(y_logits, ids)
+<                 top_mt_cy_logits = tf.batch_gather(cy_logits, ids)
+<                 pmi = top_mt_cy_logits - top_mt_y_logits
+< 
+<                 log_prob = top_logits
+---
+>                 # There are some strategies to choose k=beam words from [bat * beam, vocab]
+>                 sampling_method = params.get('sampling_method', None)
+>                 if sampling_method is None or sampling_method == BeamSearchKeys["KEY_TOPK"]:
+>                     # Normal top-k selection
+>                     top_logits, ids = tf.math.top_k(logits, beam_size, False, name='pre_tops') 
+>                 elif sampling_method == BeamSearchKeys["KEY_SAMPLING"]:
+>                     # Random sampling based on probability distribution
+>                     ids = tf.random.multinomial(logits, beam_size) # [bat*beam, beam]
+>                     ids = tf.cast(ids, tf.int32)
+>                     top_logits = tf.batch_gather(logits, ids) # [bat*beam, beam]
+>                 elif sampling_method == BeamSearchKeys["KEY_DIVERSE_BEAM_SEARCH"]:
+>                     # [Li+ 2016] "A simple, fast diverse decoding algorithm" with
+>                     # a fixed diversity rate.
+>                     top_logits, ids = tf.math.top_k(logits, beam_size, False, name='pre_tops') 
+>                     diversify_bias = tf.cast(tf.range(beam_size), tf.float32) * params["diversity_rate"]
+>                     top_logits = tf.cond(
+>                         tf.equal(tf.shape(loop_vars['generated_seq'])[2], 0),
+>                         lambda: top_logits,
+>                         lambda: top_logits - diversify_bias[None])
+>                 else:
+>                     assert False
+> 
+>                 # get the log probabilities ->[bat * beam, beam] 
+>                 if normalize_logits:
+>                     with tf.name_scope('logits_to_log_prob'):
+>                         log_prob = top_logits - tf.math.reduce_logsumexp(logits, axis=-1, keepdims=True) 
+>                 else:
+>                     log_prob = top_logits
+103d115
+<                     pmi = tf.reshape(pmi, [batch_size, beam_size**2])
+111,112c123,124
+<                     old_forked_seqp = fork(loop_vars['seq_log_prob'])
+<                     old_forked_score = fork(loop_vars['score'])
+---
+>                     forked_seqp = fork(loop_vars['seq_log_prob'])
+>                     forked_score = fork(loop_vars['score'])
+118c130
+<                     new_forked_seqp = old_forked_seqp + tf.where(forked_ended, eos_mask, log_prob)
+---
+>                     forked_seqp = forked_seqp + tf.where(forked_ended, eos_mask, log_prob)
+120,127c132,134
+<                     # Compute score for pruning [bat, old_beam * new_beam]
+<                     new_mt_score = get_score(new_forked_seqp, cur_pos[:, None] + 1)
+<                     old_forked_pmi = fork(loop_vars['seq_pmi'])
+<                     prun_score = old_forked_pmi + new_mt_score
+< 
+<                     # Update PMI
+<                     new_forked_pmi = old_forked_pmi + tf.where(forked_ended, eos_mask, pmi)
+<                     new_forked_score = tf.where(forked_ended, old_forked_score + eos_mask, new_forked_pmi + new_mt_score)
+---
+>                     # Update sequence score [bat, old_beam * new_beam]
+>                     forked_score = tf.where(forked_ended, forked_score + eos_mask,
+>                         get_score(forked_seqp, cur_pos[:, None] + 1))
+131c138
+<                 _, top_ind = tf.math.top_k(prun_score, beam_size, False)
+---
+>                 top_score, top_ind = tf.math.top_k(forked_score, beam_size, False)
+152,155c159
+<                 new_vars['seq_log_prob'] = tf.batch_gather(new_forked_seqp, top_ind)
+< 
+<                 # UPDATE seq_pmi [bat, beam]
+<                 new_vars['seq_pmi'] = tf.batch_gather(new_forked_pmi, top_ind)
+---
+>                 new_vars['seq_log_prob'] = tf.batch_gather(forked_seqp, top_ind)
+158c162
+<                 new_vars['score'] = tf.batch_gather(new_forked_score, top_ind)
+---
+>                 new_vars['score'] = top_score
+215d218
+<             'seq_pmi': tf.concat([tf.zeros([batch_size, 1]), tf.fill([batch_size, beam_size - 1], NEG_INF)], axis=1),
+227d229
+<             'seq_pmi': tf.TensorShape([None, None]),
