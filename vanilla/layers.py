@@ -177,7 +177,7 @@ class MultiheadAttention(keras.layers.Layer):
         self.out = tf.layers.Dense(self.d_model, use_bias=False, name='out')
 
 
-    def call(self, query, target, bias, training=False, cache=None):
+    def call(self, query, target, bias, training, cache=None):
         """
         Args:
             query: [B, len_q, E]
