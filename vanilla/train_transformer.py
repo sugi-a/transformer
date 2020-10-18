@@ -12,10 +12,10 @@ from tensorflow.nest import map_structure
 import numpy as np
 from nltk.translate.bleu_score import corpus_bleu
 
-from .vanilla import Transformer, seq_to_padding_mask, label_smoothing
-from .multi_gpu import *
-from .custom_text_data_pipeline.core import *
-from .custom_text_data_pipeline.vocabulary import Vocabulary
+from .layers import Transformer, label_smoothing
+from ..utils.multi_gpu import *
+from ..custom_text_data_pipeline.core import *
+from ..custom_text_data_pipeline.vocabulary import Vocabulary
 
 
 @tf.function

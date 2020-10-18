@@ -1,7 +1,6 @@
 from logging import getLogger; logger = getLogger(__name__)
 import itertools
 import random
-random_ = random
 
 from .vocabulary import Vocabulary
 
