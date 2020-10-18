@@ -1,10 +1,7 @@
 from logging import getLogger; logger = getLogger(__name__)
-import tensorflow as tf
-from tensorflow.contrib.framework import nest
 import numpy as np
-
-from .relative_position import RelativePositionMultiheadSelfAttention
-from .decoding import beam_search_decode, beam_search_decode_V2
+import tensorflow as tf
+from tensorflow import keras
 
 NEG_INF = -1e9
 
