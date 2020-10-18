@@ -95,7 +95,7 @@ class RelativePositionMultiheadSelfAttention(keras.layers.Layer):
         # [batch, length_q, emb_size]
         outputs = tf.concat(tf.unstack(outputs, axis=1), axis=2)
 
-        outputs = self.att_out_layer(outputs)
+        outputs = self.out(outputs)
 
         return outputs
 
