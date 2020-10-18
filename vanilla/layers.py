@@ -3,7 +3,8 @@ import numpy as numpy
 import tensorflow as tf
 from tensorflow import keras
 
-from beam_search import beam_search, length_penalty
+from ..utils.beam_search import beam_search
+from .relative_position import RelativePositionMultiheadSelfAttention
 
 """
 - Frequently used notation
@@ -727,7 +728,8 @@ class Transformer(keras.layers.Layer):
 
 
     def beam_search_decode_with_prefix(
-            self, x, prefix_or_sos , eos, beam_size, maxlen=None):
+            self, x, prefix_or_sos, eos, beam_size, maxlen=None,
+            length_penalty_fn=None):
         """
         Args:
             x: [B, L_enc]
@@ -792,7 +794,7 @@ class Transformer(keras.layers.Layer):
             maxlen=maxlen,
             pad=0,
             shape_invariants=shape_inv,
-            length_penalty_fn=None
+            length_penalty_fn=length_penalty_fn
         )
 
         # [B, K, L_pfx - 1 + L_out]
