@@ -166,8 +166,8 @@ class EmbeddingLayer(keras.layers.Layer):
 
 
 class MultiheadAttention(keras.layers.Layer):
-    def __init__(self, d_model, n_heads, dropout_rate, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, d_model, n_heads, dropout_rate, **kwargs):
+        super().__init__(**kwargs)
         self.d_model = d_model
         self.n_heads = n_heads
         self.q = keras.layers.Dense(self.d_model, use_bias=False, name='q')
