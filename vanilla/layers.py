@@ -166,7 +166,7 @@ class EmbeddingLayer(keras.layers.Layer):
 
 
 class MultiheadAttention(keras.layers.Layer):
-    def __init__(self, d_model, n_heads, dropout_rate=0.1, *args, **kwargs):
+    def __init__(self, d_model, n_heads, dropout_rate, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.d_model = d_model
         self.n_heads = n_heads
