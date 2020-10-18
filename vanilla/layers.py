@@ -358,7 +358,7 @@ class Encoder(keras.layers.Layer):
         self.post_emb_dropout = keras.layers.Dropout(dropout_rate)
         if not use_rel_pos:
             self.blocks = [
-                EncoderRelPosBlock(
+                EncoderBlock(
                     d_model, n_heads, dropout_rate, ff_size, norm_eps, 
                     name=f'layer_{i}')
             ]
@@ -366,7 +366,7 @@ class Encoder(keras.layers.Layer):
             assert rel_pos_max_dist is not None\
                 and rel_pos_unique_per_head is not None
             self.blocks = [
-                EncoderBlock(
+                EncoderRelPosBlock(
                     d_model, n_heads, dropout_rate, ff_size, norm_eps,
                     rel_pos_max_dist, rel_pos_unique_per_head,
                     name=f'layer_{i}')
