@@ -336,10 +336,10 @@ class Train:
         )
     
 
-    def dataset_from_gen(self, gen, strct=None):
-        strct = (None, None) if strct is None else strct
+    def dataset_from_gen(self, gen, structure=None):
+        structure = (None, None) if structure is None else structure
         dtype = map_structure(lambda x: tf.int32, structure)
-        shape = map_structure(lambda x: tf.TensorShape([None, None]), strct)
+        shape = map_structure(lambda x: tf.TensorShape([None, None]), structure)
         return tf.data.Dataset.from_generator(gen, dtype, shape)
 
 
