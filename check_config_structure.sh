@@ -14,7 +14,7 @@ tmp=$tmpd/a.ts
     echo ';'
 } > $tmp
 
-npx tsc $tmpd/a.ts \
+npx tsc --strict $tmpd/a.ts \
     && echo 'Succeeded!' \
     || echo 'Illegal Config Structure!'
 
