@@ -338,9 +338,9 @@ class Train:
         pfn = self.pipeline_fns
         
         return (
-            ChainableGenerator(
-                lambda: zip(dc['source_test'], dc['target_test']))
-            .trans(gen_line_from_files_multi)
+            ChainableGenerator.zip(
+                lambda: gen_line_from_file(dc['source_test']),
+                lambda: gen_line_from_file(dc['target_test']))
             .trans(gen_line2IDs_multi, (self.vocab_src, self.vocab_trg))
             .trans(pfn['batching'])
             .trans(gen_pad_batch_multi)
