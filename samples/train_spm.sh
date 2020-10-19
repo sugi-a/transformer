@@ -2,9 +2,9 @@
 
 V="./vocab.json"
 
-SRC_TRAIN_DATA=""
-TRG_TRAIN_DATA=""
-MODEL_PREFIX=""
+SRC_TRAIN_DATA="./en-fr/train.en"
+TRG_TRAIN_DATA="./en-fr/train.fr"
+MODEL_PREFIX="spm_shared"
 
 SIZE="$(cat $V | jq '.size')"
 PAD_ID="$(cat $V | jq '.PAD_ID')"
@@ -21,7 +21,7 @@ spm_train \
     --vocab_size=$SIZE \
     --character_coverage=0.9995 \
     --pad_id=$PAD_ID \
-    --bos_id=$BOS_ID \
+    --bos_id=$SOS_ID \
     --eos_id=$EOS_ID \
     --unk_id=$UNK_ID \
     --user_defined_symbols=$USER_SYMBOLS || { echo 'SPM TRAIN FAILED'; exit 1; }
