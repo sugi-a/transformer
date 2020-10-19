@@ -1,4 +1,4 @@
-namespace TransformerBasic {
+namespace TransformerModel {
     type RelPos = {
             'use_rel_pos': true,
             'rel_pos_max_dist': bigint,

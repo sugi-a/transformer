@@ -4,7 +4,7 @@
  * The definition is written in Typescript format.
  */
 
-namespace TrainLegacy {
+namespace TransformerTrainLegacy {
     type lenSmoothConfig_ = {
             'method': 'segsort',
             'segsize': bigint
