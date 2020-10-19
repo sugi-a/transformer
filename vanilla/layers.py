@@ -700,7 +700,9 @@ class Transformer(keras.layers.Layer):
             name='decoder')
     
 
-    def call(self, enc_input, dec_input, training, ret_embedding=False):
+    def call(
+            self, enc_input, dec_input, training,
+            ret_embedding=False, offsets=None):
         """
         Args:
             enc_input: [B, L_enc], int32
@@ -721,7 +723,7 @@ class Transformer(keras.layers.Layer):
             context=enc_input,
             ctx_attn_bias='padding_bias',
             cache=None,
-            offsets=None,
+            offsets=offsets,
             ret_embedding=ret_embedding)
         
         return dec_out
