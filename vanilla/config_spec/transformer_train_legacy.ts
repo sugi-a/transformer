@@ -4,33 +4,33 @@
  * The definition is written in Typescript format.
  */
 
-namespace TransformerTrainLegacy {
-    type lenSmoothConfig_ = {
-            'method': 'segsort',
-            'segsize': bigint
-        };
-    type LenSmoothConfig = lenSmoothConfig_ & {'post_shuf_buf_size': bigint};
+type Int = number;
 
-    export type config = {
-        'batch': {
-            'constraint': ('capacity' | 'size')
-            'size': bigint,
-            'shuffle_buffer_size': bigint | null,
-            'length_smoothing': null | LenSmoothConfig
-        },
-        'random_seed': number,
-        'warm_up_step': bigint,
-        'label_smoothing': number,
-        'max_step': bigint,
-        'max_epoch': bigint,
-        'early_stopping_patience': bigint, // in epochs
-        'early_stopping_criterion': 'loss' | 'bleu',
-        'summary_interval': bigint, // in steps
-        'data': {
-            'source_train': string[],
-            'target_train': string[],
-            'source_dev': string,
-            'target_dev': string
-        }
+type lenSmoothConfig_ = {
+        'method': 'segsort',
+        'segsize': Int
     };
-}
+type LenSmoothConfig = lenSmoothConfig_ & {'post_shuf_buf_size': Int};
+
+export type Config = {
+    'batch': {
+        'constraint': ('capacity' | 'size')
+        'size': Int,
+        'shuffle_buffer_size': Int | null,
+        'length_smoothing': null | LenSmoothConfig
+    },
+    'random_seed': number,
+    'warm_up_step': Int,
+    'label_smoothing': number,
+    'max_step': Int,
+    'max_epoch': Int,
+    'early_stopping_patience': Int, // in epochs
+    'early_stopping_criterion': 'loss' | 'bleu',
+    'summary_interval': Int, // in steps
+    'data': {
+        'source_train': string[],
+        'target_train': string[],
+        'source_dev': string,
+        'target_dev': string
+    }
+};

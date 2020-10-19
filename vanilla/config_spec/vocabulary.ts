@@ -1,10 +1,10 @@
-namespace Vocabulary {
-    export type config = {
-        "PAD_ID": bigint,
-        "SOS_ID": bigint,
-        "EOS_ID": bigint,
-        "UNK_ID": bigint,
-        "source_dict": string,
-        "target_dict": string,
-    }
+type Int = number;
+
+export type Config = {
+    "PAD_ID": Int,
+    "SOS_ID": Int,
+    "EOS_ID": Int,
+    "UNK_ID": Int,
+    "source_dict": string,
+    "target_dict": string,
 }
