@@ -1,4 +1,5 @@
 {
+    "size": 16000,
     "PAD_ID": 0,
     "SOS_ID": 1,
     "EOS_ID": 2,
