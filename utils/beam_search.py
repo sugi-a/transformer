@@ -88,7 +88,7 @@ def beam_search(
 
         # Force EOS for sequences longer than or equal to their maxlen
         non_eos_bias = tf.concat([
-            tf.ones_like(t_logp[:, :, :eos], tf.float32) * (-INF)
+            tf.ones_like(t_logp[:, :, :eos], tf.float32) * (-INF),
             t_logp[:, :, eos: eos + 1],
             tf.ones_like(t_logp[:, :, eos + 1:], tf.float32) * (-INF)
         ], axis=-1)

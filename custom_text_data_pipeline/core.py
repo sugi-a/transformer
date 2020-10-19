@@ -116,7 +116,7 @@ def gen_batch_of_capacity_multi(
         width_fn = lambda seqs: sum(map(len, seqs))
 
     if capacity_fn is None:
-        capacity_fn = lambda (w, h): w * h
+        capacity_fn = lambda w, h: w * h
 
     batch = []
     maxw = 0
@@ -143,7 +143,7 @@ def gen_padded_batch_multi(
     assert (batch_size is None) != (capacity is None)
 
     fn = gen_batch_multi if batch_size is not None else \
-        lambda (a,b): gen_batch_of_capacity_multi(a, b, width_fn, capacity_fn)
+        lambda a,b: gen_batch_of_capacity_multi(a, b, width_fn, capacity_fn)
 
     yield from gen_pad_batch_multi(fn(seqs_iter, batch_size), PAD_ID=PAD_ID)
 

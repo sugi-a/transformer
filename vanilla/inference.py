@@ -154,7 +154,7 @@ class InferenceBase:
         dataset = (
             self.create_dataset_multi((x, y), (self.vocab_src, self.vocab_trg))
             .prefech(1)
-            .map(lambda b: self.comp_seq_logp(b[0], b[1])),
+            .map(lambda b: self.comp_seq_logp(b[0], b[1]))
             .unbatch().prefech(1)
         )
         yield from dataset

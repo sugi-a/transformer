@@ -133,7 +133,7 @@ def list2tensor_array(lst):
     
     for i, x in enumerate(lst):
         arrays = nest.map_structure(
-            lambda (a, v): a.write(i, v), arrays, x)
+            lambda a, v: a.write(i, v), arrays, x)
     
     return arrays
 
@@ -167,7 +167,7 @@ def sequential_map(fn, list_x, out_dtype):
     for i in tf.range(N):
         tf.autograph.experimental.set_loop_options(parallel_iterations=1)
         o_arrays = nest.map_structure(
-            lambda (a, v): a.write(i, fn(v)), o_arrays, i_arrays)
+            lambda a, v: a.write(i, fn(v)), o_arrays, i_arrays)
     
     return [nest.map_structure(lambda a: a.read(i), o_arrays) for i in range(N)]
 

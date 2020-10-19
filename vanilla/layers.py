@@ -57,7 +57,7 @@ def seq_to_padding_mask(seq, dtype=tf.int32, pad_value=0):
     return tf.cast(seq != pad_value, dtype)
 
 
-def seq_to_padding_bias(seq, dtype=tf.float32, pad_value):
+def seq_to_padding_bias(seq, dtype=tf.float32, pad_value=0):
     """
     Returns:
         <[Batch, MaxL], dtype>
@@ -125,7 +125,7 @@ def transfer_padding_to_right(seq, pad=0, offsets=None):
     """
     L = tf.shape(seq)
     if offsets is None:
-        offsets = tf.reduce_sum(tf.cast(seq == pad), tf.int32), axis=1)
+        offsets = tf.reduce_sum(tf.cast(seq == pad, tf.int32), axis=1)
     indices = tf.math.minimum(L, tf.range(L) + offsets[:, None]) % L
     new_seq = tf.gather(seq, indices, batch_dims=1)
     return new_seq
@@ -306,7 +306,7 @@ class EncoderBlock(keras.layers.Layer):
             dropout_rate,
             norm_eps)
         self.ff = NormResidualWrapper(
-            lambda: Feedforward(ff_size, dropout_rate)
+            lambda: Feedforward(ff_size, dropout_rate),
             dropout_rate,
             norm_eps)
     
@@ -316,18 +316,18 @@ class EncoderBlock(keras.layers.Layer):
         return self.ff(y)
         
 
-class EncoderRelPosBlock(DecoderBlock):
+class EncoderRelPosBlock(EncoderBlock):
     def __init__(
             self, d_model, n_heads, dropout_rate, ff_size, norm_eps,
             rel_pos_max_dist, rel_pos_unique_per_head,
             context=True, **kwargs):
-        super()__init__(
+        super().__init__(
             d_model=d_model, n_heads=n_heads, dropout_rate=dropout_rate,
             ff_size=ff_size, norm_eps=norm_eps, **kwargs)
         self.self_attn = NormResidualWrapper(
             lambda: RelativePositionMultiheadSelfAttention(
                 d_model, n_heads, dropout_rate,
-                rel_pos_max_dist, rel_pos_unique_per_head)
+                rel_pos_max_dist, rel_pos_unique_per_head),
             dropout_rate,
             norm_eps)
 
@@ -454,7 +454,7 @@ class DecoderRelPosBlock(DecoderBlock):
             self, d_model, n_heads, dropout_rate, ff_size, norm_eps,
             rel_pos_max_dist, rel_pos_unique_per_head,
             context=True, **kwargs):
-        super()__init__(
+        super().__init__(
             d_model=d_model, n_heads=n_heads, dropout_rate=dropout_rate,
             ff_size=ff_size, norm_eps=norm_eps, context=context, **kwargs)
         # Override Self-attention layer
@@ -479,11 +479,11 @@ class Decoder(keras.layers.Layer):
             use_rel_pos,
             n_blocks,
             norm_eps,
-            in_emb=None,
             rel_pos_max_dist,
             rel_pos_unique_per_head,
+            in_emb=None,
             context=True,
-            **kwargs)
+            **kwargs):
         super().__init__(**kwargs)
         if in_emb:
             self.in_emb = in_emb
@@ -827,4 +827,4 @@ class Transformer(keras.layers.Layer):
             share_enc_dec_embedding=c['share_enc_dec_embedding'],
             rel_pos_max_dist=c['rel_pos_max_dist'],
             rel_pos_unique_per_head=c['rel_pos_unique_per_head'],
-            **kwargs):
+            **kwargs)
