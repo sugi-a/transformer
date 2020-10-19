@@ -11,15 +11,6 @@ namespace TrainLegacy {
         };
     type LenSmoothConfig = lenSmoothConfig_ & {'post_shuf_buf_size': bigint};
 
-    type CkptConfig = ({
-            'interval_type': 'constant',
-            'interval': bigint,
-        } | {
-            'interval_type': 'exponential',
-            'c1': bigint,
-            'r': number
-        })
-
     export type config = {
         'batch': {
             'constraint': ('capacity' | 'size')
@@ -40,14 +31,6 @@ namespace TrainLegacy {
             'target_train': string[],
             'source_dev': string,
             'target_dev': string
-        },
-        'vocab': {
-            "PAD_ID": bigint,
-            "SOS_ID": bigint,
-            "EOS_ID": bigint,
-            "UNK_ID": bigint,
-            "source_dict": string,
-            "target_dict": string,
         }
     };
 }

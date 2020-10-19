@@ -103,30 +103,41 @@ def weighted_avg(nesteds, weights):
 
 def get_visible_gpus():
     return len(tf.config.experimental.list_physical_devices('GPU'))
+
+
+def get_vocabs_from_config(vocab_config):
+    vc = vocab_config
+    vocab_src = Vocabulary(
+        vc['source_dict'],
+        PAD_ID=vc['PAD_ID'],
+        SOS_ID=vc['SOS_ID'],
+        EOS_ID=vc['EOS_ID'],
+        UNK_ID=vc['UNK_ID'])
+    vocab_trg = Vocabulary(
+        vc['target_dict'],
+        PAD_ID=vc['PAD_ID'],
+        SOS_ID=vc['SOS_ID'],
+        EOS_ID=vc['EOS_ID'],
+        UNK_ID=vc['UNK_ID'])
+    return vocab_src, vocab_trg
     
 
 class Train:
     def __init__(
-            self, transformer_model, train_config, logdir):
+            self,
+            transformer_model,
+            source_vocab,
+            target_vocab,
+            train_config,
+            logdir):
         self.logdir = logdir
 
         self.model = transformer_model
 
         self.train_config = train_config
 
-        vc = train_config['vocab']
-        self.vocab_src = Vocabulary(
-            vc['source_dict'],
-            PAD_ID=vc['PAD_ID'],
-            SOS_ID=vc['SOS_ID'],
-            EOS_ID=vc['EOS_ID'],
-            UNK_ID=vc['UNK_ID'])
-        self.vocab_trg = Vocabulary(
-            vc['target_dict'],
-            PAD_ID=vc['PAD_ID'],
-            SOS_ID=vc['SOS_ID'],
-            EOS_ID=vc['EOS_ID'],
-            UNK_ID=vc['UNK_ID'])
+        self.vocab_src = source_vocab
+        self.vocab_trg = target_vocab
 
         self.metrics = [
             'loss': {
@@ -381,8 +392,23 @@ class Train:
             model=self.model
         )
 
+        ckpt_best = tf.train.Checkpoint(
+            epoch=epoch,
+            step=step,
+            model=self.model
+        )
+
         manager = tf.train.CheckpointManager(
-            ckpt, f'{self.logdir}/ckpt', step_counter=step)
+            ckpt,
+            directory=f'{self.logdir}/checkpoint',
+            max_to_keep=None,
+            step_counter=step)
+
+        manager_best = tf.train.CheckpointManager(
+            ckpt_best,
+            directory=f'{self.logdir}/checkpoint_best',
+            max_to_keep=2,
+            step_counter=step)
         
         if manager.latest_checkpoint:
             logger.info(f'Restoring from {manager.latest_checkpoint}')
@@ -430,17 +456,19 @@ class Train:
                 score_ = self.metrics['loss']['dev_mean']
             else:
                 score_ = bleu
+
+            # Checkpoint depending on early stopping test
             if score_ > early_stopping['best_score']:
                 early_stopping['best_score'].assign(score_)
                 early_stopping['best_epoch'].assign(epoch)
+
+                manager.save(step)
+                manager_best.save(step)
             elif epoch - early_stopping['best_epoch'] \
                     > tc['early_stopping_patience']:
-                logger.info('Early Stopping')
                 manager.save(step)
+                logger.info('Early Stopping')
                 break
-
-            # Checkpoint
-            manager.save(step)
     
 
     def check_dataset(self):
@@ -496,7 +524,7 @@ class Train:
 
 class TrainMultiGPULegacy(Train):
     def __init__(self, *args, **kwargs, gpus=None, accums=None,
-            split_type='pre_split'):
+            split_type='small_minibatch'):
         super().__init__(*args, **kwargs)
 
         vis_gpus = get_visible_gpus()
@@ -507,7 +535,7 @@ class TrainMultiGPULegacy(Train):
 
         self.split_type = split_type
 
-        if split_type == 'pre_split':
+        if split_type == 'small_minibatch':
             pfn = self.pipeline_fns
             n = self.gpus * self.accums
             if bc['constraint'] == 'size':
@@ -515,7 +543,7 @@ class TrainMultiGPULegacy(Train):
             else:
                 pfn['batching'] = \
                     lambda x: gen_batch_of_capacity_multi(x, bc['size'] // n)
-        elif split_type == 'post_split':
+        elif split_type == 'divide_batch':
             pass
         else:
             raise Exception('Invalid parameter')
@@ -524,7 +552,7 @@ class TrainMultiGPULegacy(Train):
     def dataset_from_gen(self, gen):
         nsplit = self.gpus * self.accums
 
-        if self.split_type == 'pre_split':
+        if self.split_type == 'small_minibatch':
             gen = gen.trans(gen_fold, nsplit,
                 padding_for_remainder=(np.zeros([0, 0]),) * 2)
             return super().dataset_from_gen(gen, ((None, None),) * nsplit)
@@ -617,31 +645,66 @@ def main():
         
         with open(f'{args.dir}/train_config.json') as f:
             train_config = json.load(f)
+        
+        with open(f'{args.dir}/vocab_config.json') as f:
+            vocab_config = json.load(f)
 
+        # Transformer Model
         model = Transformer.from_config(model_config)
 
-        logdir = f'{args.dir}/log'
+        # Vocabulary
+        vocab_src, vocab_trg = get_vocabs_from_config(vocab_config)
+
+        # Directory for logging
+        logdir = f'{args.dir}'
 
         if args.debug_base_class:
-            trainer = Train(model, train_config, logdir)
+            trainer = Train(
+                model,
+                source_vocab=vocab_src,
+                target_vocab=vocab_trg,
+                train_config=train_config,
+                logdir=logdir)
         else:
-            sp_type = 'post_split' if args.debug_post_split else 'pre_split'
             trainer = TrainMultiGPULegacy(
-                model, train_config, logdir,
-                gpus=args.n_gpus, accums=args.n_accums, split_type=sp_type)
+                model,
+                source_vocab=vocab_src,
+                target_vocab=vocab_trg,
+                train_config=train_config,
+                logdir=logdir,
+                gpus=args.n_gpus,
+                accums=args.n_accums,
+                split_type='divide_batch' \
+                    if args.debug_post_split else 'small_minibatch')
         
         trainer.train()
     elif args.mode == 'check_data':
         with open(f'{args.dir}/train_config.json') as f:
             train_config = json.load(f)
+
+        with open(f'{args.dir}/vocab_config.json') as f:
+            vocab_config = json.load(f)
+        
+        vocab_src, vocab_trg = get_vocabs_from_config(vocab_config)
         
         if args.debug_base_class:
-            trainer = Train(None, train_config, None)
+            trainer = Train(
+                model=None,
+                source_vocab=vocab_src,
+                target_vocab=vocab_trg,
+                train_config=train_config,
+                logdir=None)
         else:
-            sp_type = 'post_split' if args.debug_post_split else 'pre_split'
             trainer = TrainMultiGPULegacy(
-                None, train_config, None,
-                gpus=args.n_gpus, accums=args.n_accums, split_type=sp_type)
+                model=None,
+                source_vocab=vocab_src,
+                target_vocab=vocab_trg,
+                train_config=train_config,
+                logdir=None
+                gpus=args.n_gpus,
+                accums=args.n_accums,
+                split_type='divide_batch' \
+                    if args.debug_post_split else 'small_minibatch')
         
         trainer.check_dataset()
     else:
