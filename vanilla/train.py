@@ -72,12 +72,12 @@ def accuracy(logits, y):
 
 
 def sequential_map_reduce_sum(fn, inputs):
-    add_fn = lambda (*x): tf.math.add_n(x)
+    add_fn = lambda *x: tf.math.add_n(x)
     return map_structure(add_fn, *sequential_map(fn, inputs))
     
 
 def distributed_map_reduce_sum(fn, inputs):
-    add_fn = lambda (*x): tf.math.add_n(x)
+    add_fn = lambda *x: tf.math.add_n(x)
     return map_structure(add_fn , *distr_map(fn, inputs))
 
 
@@ -139,18 +139,18 @@ class Train:
         self.vocab_src = source_vocab
         self.vocab_trg = target_vocab
 
-        self.metrics = [
+        self.metrics = {
             'loss': {
-                'calc': lambda (logits, y, loss): loss,
+                'calc': lambda logits, y, loss: loss,
                 'train_mean': keras.metrics.Mean(),
                 'dev_mean': kearas.metrics.Mean()
             },
             'accuracy': {
-                'calc': lambda (logits, y, loss): accuracy(logits, y),
+                'calc': lambda logits, y, loss: accuracy(logits, y),
                 'train_mean': keras.metrics.Mean(),
                 'dev_mean': keras.metrics.Mean()
             }
-        ]
+        }
 
         # Dataset generator pipeline settings
         pfn = self.pipeline_fns = {}
@@ -523,8 +523,8 @@ class Train:
 
 
 class TrainMultiGPULegacy(Train):
-    def __init__(self, *args, **kwargs, gpus=None, accums=None,
-            split_type='small_minibatch'):
+    def __init__(self, *args, gpus=None, accums=None,
+            split_type='small_minibatch', **kwargs):
         super().__init__(*args, **kwargs)
 
         vis_gpus = get_visible_gpus()
@@ -700,7 +700,7 @@ def main():
                 source_vocab=vocab_src,
                 target_vocab=vocab_trg,
                 train_config=train_config,
-                logdir=None
+                logdir=None,
                 gpus=args.n_gpus,
                 accums=args.n_accums,
                 split_type='divide_batch' \
