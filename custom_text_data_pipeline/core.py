@@ -220,6 +220,12 @@ def gen_fold(iterator, n, padding_for_remainder=None):
                     return
             yield tuple(buf) 
 
+
+def fork_iterable(iterable, n):
+    its = itertools.tee(iterable, n)
+    return tuple(map(lambda x:x[i], it) for i, it in enumerate(its))
+
+
 class ChainableGenerator:
     def __init__(self, gen):
         self.gen = gen
