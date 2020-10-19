@@ -7,4 +7,4 @@ export type Config = {
     "UNK_ID": Int,
     "source_dict": string,
     "target_dict": string,
-}
+};
