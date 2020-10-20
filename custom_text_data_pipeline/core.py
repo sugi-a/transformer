@@ -2,6 +2,8 @@ from logging import getLogger; logger = getLogger(__name__)
 import itertools
 import random
 
+import numpy as np
+
 from .vocabulary import Vocabulary
 
 """
@@ -128,6 +130,7 @@ def gen_batch_of_capacity_multi(
         if capacity_fn(max(maxw, w), len(batch)) > capacity:
             yield tuple(map(list, zip(*batch)))
             batch = []
+            maxw = 0
         
         maxw = max(maxw, w)
         batch.append(seqs)
@@ -168,7 +171,7 @@ def gen_random_sample(iterable, bufsize=None):
         yield from buf
 
 
-def gen_segment_sort(iterator, segsize=10000, key=None):
+def gen_segment_sort(iterable, segsize=10000, key=None):
     i_seg = []
     o_seg = None
     f = True
@@ -194,12 +197,12 @@ def gen_line_from_file(fname):
 
 def gen_line_from_files(fname_iter):
     for fname in fname_iter:
-        yield from gen_line_from_file
+        yield from gen_line_from_file(fname)
 
 
 def gen_line_from_files_multi(fnames_iter):
     for fnames in fnames_iter:
-        yield from zip(*map(gen_line_from_files, fnames))
+        yield from zip(*map(gen_line_from_file, fnames))
 
 
 def gen_fold(iterator, n, padding_for_remainder=None):
@@ -216,7 +219,8 @@ def gen_fold(iterator, n, padding_for_remainder=None):
                 try:
                     buf[i] = next(iterator)
                 except:
-                    yield tuple(buf + [padding_for_remainder] * (n - i))
+                    if i > 0:
+                        yield tuple(buf[:i] + [padding_for_remainder] * (n - i))
                     return
             yield tuple(buf) 
 
