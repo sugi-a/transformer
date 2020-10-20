@@ -102,7 +102,8 @@ def weighted_avg(nesteds, weights):
 
 
 def get_visible_gpus():
-    return len(tf.config.experimental.list_physical_devices('GPU'))
+    return len(tf.config.experimental.list_physical_devices('GPU')) \
+        + len(tf.config.experimental.list_physical_devices('XLA_GPU'))
 
 
 def get_vocabs_from_config(vocab_config):
@@ -120,19 +121,58 @@ def get_vocabs_from_config(vocab_config):
         EOS_ID=vc['EOS_ID'],
         UNK_ID=vc['UNK_ID'])
     return vocab_src, vocab_trg
+
+
+class Stats:
+    def __init__(self):
+        self.reset()
+
+
+    def reset(self):
+        self.sum = 0
+        self.x2 = 0
+        self.m = 1e10
+        self.M = -1e10
+        self.n = 0
+        self.mean = 0
+        self.var = 0
+        self.std = 0
+
+
+    def update(self, x):
+        self.sum += x
+        self.x2 += x ** 2
+        self.m = min(self.m, x)
+        self.M = max(self.M, x)
+        self.n += 1
+
+
+    def summarize(self):
+        self.mean = self.sum / self.n
+        self.var = self.x2 / self.n - self.mean ** 2
+        self.std = self.var ** 0.5
+        return {
+            'mean': self.mean,
+            'sum': self.sum,
+            'min': self.m,
+            'max': self.M,
+            'var': self.var,
+            'std': self.std,
+            'n': self.n
+        }
     
 
 class Train:
     def __init__(
             self,
-            transformer_model,
+            model,
             source_vocab,
             target_vocab,
             train_config,
             logdir):
         self.logdir = logdir
 
-        self.model = transformer_model
+        self.model = model
 
         self.train_config = train_config
 
@@ -143,7 +183,7 @@ class Train:
             'loss': {
                 'calc': lambda logits, y, loss: loss,
                 'train_mean': keras.metrics.Mean(),
-                'dev_mean': kearas.metrics.Mean()
+                'dev_mean': keras.metrics.Mean()
             },
             'accuracy': {
                 'calc': lambda logits, y, loss: accuracy(logits, y),
@@ -163,7 +203,7 @@ class Train:
         if bc['length_smoothing'] is None:
             pfn['length_smoothing'] = lambda x: x
             pfn['post_ls_shuffle'] = lambda x: x
-        elif bc['length_smoothing'] == 'segsort':
+        elif bc['length_smoothing']['method'] == 'segsort':
             pfn['length_smoothing'] = lambda x: gen_segment_sort(
                 x,
                 segsize=bc['length_smoothing']['segsize'],
@@ -339,8 +379,8 @@ class Train:
         
         return (
             ChainableGenerator.zip(
-                lambda: gen_line_from_file(dc['source_test']),
-                lambda: gen_line_from_file(dc['target_test']))
+                lambda: gen_line_from_file(dc['source_dev']),
+                lambda: gen_line_from_file(dc['target_dev']))
             .trans(gen_line2IDs_multi, (self.vocab_src, self.vocab_trg))
             .trans(pfn['batching'])
             .trans(gen_pad_batch_multi)
@@ -352,6 +392,49 @@ class Train:
         dtype = map_structure(lambda x: tf.int32, structure)
         shape = map_structure(lambda x: tf.TensorShape([None, None]), structure)
         return tf.data.Dataset.from_generator(gen, dtype, shape)
+
+
+    def unit_test(self, i):
+        if i == 0:
+            bc = self.train_config['batch']
+            dc = self.train_config['data']
+            pfn = self.pipeline_fns
+
+            gen = (
+                ChainableGenerator(
+                    lambda: zip(dc['source_train'], dc['target_train']))
+                .trans(gen_random_sample)
+                .trans(pfn['line_from_files_multi'])
+                .trans(gen_line2IDs_multi, (self.vocab_src, self.vocab_trg))
+                .trans(gen_random_sample, bufsize=bc['shuffle_buffer_size'])
+                .trans(pfn['length_smoothing'])
+                .trans(pfn['batching'])
+                .trans(gen_pad_batch_multi)
+                .map(lambda x: (len(x[0]),len(x[1]), len(x[0][0])))
+                #.trans(pfn['post_ls_shuffle'])
+            )
+                        
+            for x in gen():
+                print(x)
+        elif i == 1:
+            nsplit = self.gpus * self.accums
+            gen = self.create_train_data_gen()
+            for x,y in gen():
+                print(len(x), len(y), (len(x[0]) + len(y[0])) * len(x))
+            exit(0)
+            if self.split_type == 'small_minibatch':
+                gen = gen \
+                    .map(lambda x: list2numpy_nested(x)) \
+                    .trans(gen_fold, nsplit, (np.zeros([0, 0]),) * 2)
+                it = gen()
+                for x in it:
+                    print(nest.map_structure(lambda v: v.shape, x))
+                exit(0)
+                return super().dataset_from_gen(gen, ((None, None),) * nsplit)
+            else:
+                split = lambda *x: non_even_split(x, nsplit)
+                return super().dataset_from_gen(gen).map(split)
+
 
 
     def train():
@@ -471,55 +554,47 @@ class Train:
                 break
     
 
-    def check_dataset(self):
-        train_dataset = \
-            self.dataset_from_gen(self.create_train_data_gen()).prefetch(1)
-        dev_dataset = \
-            self.dataset_from_gen(self.create_dev_data_gen()).prefetch(1)
+    def check_dataset(self, dataset):
         
-        @tf.function
+        @tf.function(input_signature=[dataset.element_spec])
         def toks_(batch):
             return tf.math.add_n([count_toks(x) for x in nest.flatten(batch)])
-        
-        def check_dataset_(dataset):
-            last_t = start_t = time.time()
-            t2, m, M = 0, 1e10, 0
-            n, n2, n_m, n_M = 0, 1e10, 0
-            i = 0
-            for data in dataset:
-                t = time.time()
-                last_t, dt = t, t - last_t
-                t2 += dt ** 2
-                m, M = min(m, dt), max(M, dt)
-                toks = toks_(data).numpy()
-                n += toks
-                n2 += toks ** 2
-                n_m, n_M = min(n_m, toks), max(n_M, toks)
-                i += 1
-            end_t = time.time()
-            tps = (end_t - start_t) / i
 
-            for l in [
-                f'#Steps: {i}',
-                f'Time elapsed: {end_t - start_t}',
-                f'Sec/Step: {tps}',
-                f'Std[ Sec/Step ]: {(t2/i - tps ** 2) ** 0.5}',
-                f'Max[ Sec/Step ]: {M}',
-                f'Min[ Sec/Step ]: {m}',
-                f'Total Tokens: {n}',
-                f'Tokens/Step: {n / i}',
-                f'Std[ Tokens/Step ]: {(n2/i - (n/i)**2) ** 0.5}'
-                f'Max[ Tokens/Step ]: {n_M}',
-                f'Min[ Tokens/Step ]: {n_m}',
-                f'Token/Sec: {n / i / tps}',
-            ]:
-                print(l)
+        @tf.function(input_signature=[dataset.element_spec])
+        def sents_(batch):
+            return tf.math.add_n([tf.shape(x)[0] for x in nest.flatten(batch)])
+
+        @tf.function(input_signature=[dataset.element_spec])
+        def capacity_(batch):
+            return tf.math.add_n([tf.size(x) for x in nest.flatten(batch)])
+
+        @tf.function(input_signature=[dataset.element_spec])
+        def longest_(batch):
+            lens = [tf.shape(x)[1] for x in nest.flatten(batch)]
+            return tf.math.reduce_max(lens)
+
+        metrics = ['Sec', 'Tokens', 'Sents', 'Capacity','Longest']
+        stats = [Stats() for i in range(len(metrics))]
         
-        print('Train Dataset')
-        check_dataset(train_dataset)
-        print()
-        print('Dev Dataset')
-        check_dataset(dev_dataset)
+        last_t = time.time()
+        i = 0
+        for data in dataset:
+            t = time.time()
+            last_t, dt = t, t - last_t
+            scores = [
+                dt, toks_(data).numpy(), sents_(data).numpy(),
+                capacity_(data).numpy(), longest_(data).numpy()]
+            for sts, score in zip(stats, scores):
+                sts.update(score)
+            i += 1
+
+        print(f'Steps: {i}')
+        for m, sts in zip(metrics, stats):
+            res = sts.summarize()
+            print(f'{m}/Step')
+            for label, score in res.items():
+                print(f'{label}: {score}')
+            print()
 
 
 class TrainMultiGPULegacy(Train):
@@ -538,6 +613,7 @@ class TrainMultiGPULegacy(Train):
         if split_type == 'small_minibatch':
             pfn = self.pipeline_fns
             n = self.gpus * self.accums
+            bc = self.train_config['batch']
             if bc['constraint'] == 'size':
                 pfn['batching'] = lambda x: gen_batch_multi(x, bc['size'] // n)
             else:
@@ -553,11 +629,12 @@ class TrainMultiGPULegacy(Train):
         nsplit = self.gpus * self.accums
 
         if self.split_type == 'small_minibatch':
-            gen = gen.trans(gen_fold, nsplit,
-                padding_for_remainder=(np.zeros([0, 0]),) * 2)
+            gen = gen \
+                .map(lambda x: list2numpy_nested(x)) \
+                .trans(gen_fold, nsplit, (np.zeros([0, 0]),) * 2)
             return super().dataset_from_gen(gen, ((None, None),) * nsplit)
         else:
-            split = lambda x: non_even_split(x, nsplit)
+            split = lambda *x: non_even_split(x, nsplit)
             return super().dataset_from_gen(gen).map(split)
 
 
@@ -622,19 +699,19 @@ class TrainMultiGPULegacy(Train):
         return y
 
 
-def main():
+def main(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dir', '-d', type=str, default='.')
     parser.add_argument('--n_gpus', type=int)
     parser.add_argument('--n_accums', type=int)
     parser.add_argument('--seed', type=int)
-    parser.add_argument(
-        '--mode', type=str, choices=['train', 'check_data'], default='train')
+    parser.add_argument('--mode', type=str,
+        choices=['train', 'check_data', 'debug'], default='train')
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--debug_base_class', action='store_true')
     parser.add_argument('--debug_post_split', action='store_true')
     
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     basicConfig(level=DEBUG if args.debug else INFO)
 
@@ -706,10 +783,47 @@ def main():
                 split_type='divide_batch' \
                     if args.debug_post_split else 'small_minibatch')
         
-        trainer.check_dataset()
+        train_dataset = trainer.dataset_from_gen(
+            trainer.create_train_data_gen()).prefetch(1)
+        dev_dataset = trainer.dataset_from_gen(
+            trainer.create_dev_data_gen()).prefetch(1)
+        print('Train Dataset')
+        trainer.check_dataset(train_dataset)
+        print('Dev Dataset')
+        trainer.check_dataset(dev_dataset)
+    elif args.mode == 'debug':
+        with open(f'{args.dir}/train_config.json') as f:
+            train_config = json.load(f)
+
+        with open(f'{args.dir}/vocab_config.json') as f:
+            vocab_config = json.load(f)
+        
+        vocab_src, vocab_trg = get_vocabs_from_config(vocab_config)
+        
+        if args.debug_base_class:
+            trainer = Train(
+                model=None,
+                source_vocab=vocab_src,
+                target_vocab=vocab_trg,
+                train_config=train_config,
+                logdir=None)
+        else:
+            trainer = TrainMultiGPULegacy(
+                model=None,
+                source_vocab=vocab_src,
+                target_vocab=vocab_trg,
+                train_config=train_config,
+                logdir=None,
+                gpus=args.n_gpus,
+                accums=args.n_accums,
+                split_type='divide_batch' \
+                    if args.debug_post_split else 'small_minibatch')
+        
+        trainer.unit_test(1)
+        
     else:
         raise Exception('Invalid parameter')
 
 
 if __name__ == '__main__':
-    main()
+    main(sys.argv)
