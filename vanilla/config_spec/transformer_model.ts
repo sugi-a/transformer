@@ -12,6 +12,7 @@ type RelPos = {
 
 export type Config = {
     'd_model': Int,
+    'n_heads': Int,
     'maxlen': Int,
     'ff_size': Int,
     'dropout_rate': number,

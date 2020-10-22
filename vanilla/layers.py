@@ -26,6 +26,7 @@ from .relative_position import RelativePositionMultiheadSelfAttention
 
 INF = 1e10
 
+
 def positional_encoding(length, d_model):
     """Sinusoidal Positional Encoding
     Args:
@@ -45,7 +46,7 @@ def positional_encoding(length, d_model):
     return tf.concat([tf.sin(scaled_time), tf.cos(scaled_time)], axis=1)
 
 
-def seq_to_padding_mask(seq, dtype=tf.int32, pad_value=0):
+def seq_to_mask(seq, dtype=tf.int32, pad_value=0):
     """
     Args:
         seq: [Batch, MaxL]. 0 for padding.
@@ -60,10 +61,10 @@ def seq_to_padding_mask(seq, dtype=tf.int32, pad_value=0):
 def seq_to_padding_bias(seq, dtype=tf.float32, pad_value=0):
     """
     Returns:
-        <[Batch, MaxL], dtype>
+        <[Batch, 1, 1, MaxL], dtype>
         -INF for paddings, 0 for the rest.
     """
-    return -INF * (1 - seq_to_padding_mask(seq, tf.float32, pad_value))
+    return -INF * (1 - seq_to_mask(seq, tf.float32, pad_value)[:, None, None])
 
 
 def create_padding_bias(lengths, maxlen):
@@ -146,7 +147,7 @@ class EmbeddingLayer(keras.layers.Layer):
         self.emb = self.add_weight(
             name='emb',
             shape=[input_dim, output_dim],
-            dtyp=tf.float32)
+            dtype=tf.float32)
         
         self.scale = scale
 
@@ -155,7 +156,8 @@ class EmbeddingLayer(keras.layers.Layer):
         outputs = tf.nn.embedding_lookup(self.emb, inputs)
 
         if self.scale:
-            outputs = outputs * (tf.shape(self.emb)[1] ** 0.5)
+            dims = tf.cast(tf.shape(self.emb)[1], tf.float32)
+            outputs = outputs * (dims ** 0.5)
 
         return outputs
 
@@ -175,7 +177,7 @@ class MultiheadAttention(keras.layers.Layer):
         self.k = keras.layers.Dense(self.d_model, use_bias=False, name='k')
         self.v = keras.layers.Dense(self.d_model, use_bias=False, name='v')
         self.dropout = keras.layers.Dropout(dropout_rate)
-        self.out = tf.layers.Dense(self.d_model, use_bias=False, name='out')
+        self.out = keras.layers.Dense(self.d_model, use_bias=False, name='out')
 
 
     def call(self, query, target, bias, training, cache=None):
@@ -191,9 +193,9 @@ class MultiheadAttention(keras.layers.Layer):
         """
         head_size = self.d_model // self.n_heads
         
-        q = self.q_layer(query) # [batch, length, d_model]
-        k = self.k_layer(target)
-        v = self.v_layer(target)
+        q = self.q(query) # [batch, length, d_model]
+        k = self.k(target)
+        v = self.v(target)
 
         if cache is not None:
             k = tf.concat([cache['k'], k], axis=1)
@@ -311,9 +313,9 @@ class EncoderBlock(keras.layers.Layer):
             norm_eps)
     
 
-    def call(self, x):
-        y = self.self_attn(x)
-        return self.ff(y)
+    def call(self, x, bias, training):
+        y = self.self_attn(x, bias, training=training)
+        return self.ff(y, training=training)
         
 
 class EncoderRelPosBlock(EncoderBlock):
@@ -337,11 +339,13 @@ class Encoder(keras.layers.Layer):
         self,
         vocab_size,
         d_model,
+        n_heads,
         ff_size,
         dropout_rate,
         norm_eps,
         maxlen, 
         n_blocks,
+        use_pos_enc,
         use_pos_emb,
         use_rel_pos,
         rel_pos_max_dist=None,
@@ -360,8 +364,13 @@ class Encoder(keras.layers.Layer):
         if not use_rel_pos:
             self.blocks = [
                 EncoderBlock(
-                    d_model, n_heads, dropout_rate, ff_size, norm_eps, 
+                    d_model=d_model,
+                    n_heads=n_heads,
+                    dropout_rate=dropout_rate,
+                    ff_size=ff_size,
+                    norm_eps=norm_eps, 
                     name=f'layer_{i}')
+                for i in range(n_blocks)
             ]
         else:
             assert rel_pos_max_dist is not None\
@@ -380,13 +389,9 @@ class Encoder(keras.layers.Layer):
         """
         Args:
             x: <[B, L], int32>. value in [0, V - 1].
-            self_attn_bias: <[(1|B), 1, (1|L), (1|L)], float32> | 'padding_bias'
+            self_attn_bias: <[(1|B), 1, (1|L), (1|L)], float32>
                 if 'pading_bias' is specified, padding bias tensor is used
         """
-        if self_attn_bias == 'padding_bias':
-            # [B, L] -> [B, 1, 1, L]
-            self_attn_bias = seq_to_padding_bias(x)[:, None, None]
-
         # Embedding [batch, length, emb_size]
         y = self.in_emb(x)
 
@@ -408,6 +413,7 @@ class DecoderBlock(keras.layers.Layer):
     def __init__(
             self, d_model, n_heads, dropout_rate, ff_size, norm_eps,
             context=True, **kwargs):
+        super().__init__(**kwargs)
         # Self-attention layer
         self.self_attn = NormResidualWrapper(
             lambda: SelfAttention(d_model, n_heads, dropout_rate),
@@ -471,6 +477,7 @@ class Decoder(keras.layers.Layer):
             self,
             vocab_size,
             d_model,
+            n_heads,
             ff_size,
             dropout_rate,
             maxlen,
@@ -547,8 +554,7 @@ class Decoder(keras.layers.Layer):
         Args:
             self_attn_bias: [(1 | B), 1, (1|r - l), (1|r)] | 'causal_bias'
                 if 'causal_bias' is specified, causal bias is used.
-            ctx_attn_bias: [(1|B), 1, (1|r-l), (1|len_ctx)] | 'padding_bias'
-                if 'padding_bias' is specified, padding bias is used.
+            ctx_attn_bias: [(1|B), 1, (1|r-l), (1|len_ctx)]
             cache: {
                 [`layer_${i}`]: {
                     'v': <[B, L_cache, E]>,
@@ -568,14 +574,10 @@ class Decoder(keras.layers.Layer):
             # [1, 1, r, r] -> [1, 1, r-l, r]
             self_attn_bias = create_causal_bias(r)[:, :, l:]
 
-        if ctx_attn_bias == 'padding_bias':
-            # [B, L_ctx] -> [B, 1, 1, L_ctx]
-            ctx_attn_bias = seq_to_padding_bias(context)[:, None, None]
-
         # Adjust the position-related tensors
         if offsets is None:
-            pos_enc = self.pos_enc[l: r] if self.pos_enc else None
-            pos_emb = self.pos_emb[l: r] if self.pos_emb else None
+            pos_enc = self.pos_enc[l: r] if self.pos_enc is not None else None
+            pos_emb = self.pos_emb[l: r] if self.pos_emb is not None else None
         else:
             # [B, 1, 1, r] offset bias
             offset_bias = -INF * tf.sequence_mask(
@@ -603,7 +605,7 @@ class Decoder(keras.layers.Layer):
                 y,
                 self_attn_bias=self_attn_bias,
                 training=training,
-                ctx=ctx,
+                ctx=context,
                 ctx_attn_bias=ctx_attn_bias,
                 cache=cache[f'layer_{i}'] if cache is not None else None
             )
@@ -627,7 +629,6 @@ class Decoder(keras.layers.Layer):
 
     def permute_cache(self, cache, ids):
         """Rearrange each of the cached Tensors along the batch dim."""
-        cache['cur_pos'] += 1
         for i, block in enumerate(self.blocks):
             block.permute_cache(cache[f'layer_{i}'], ids)
 
@@ -637,6 +638,7 @@ class Transformer(keras.layers.Layer):
             self,
             vocab_size,
             d_model,
+            n_heads,
             maxlen,
             ff_size,
             dropout_rate,
@@ -655,6 +657,7 @@ class Transformer(keras.layers.Layer):
 
         self.vocab_size = vocab_size
         self.d_model = d_model
+        self.n_heads = n_heads
         self.maxlen = maxlen
         self.ff_size = ff_size
         self.dropout_rate = dropout_rate
@@ -670,6 +673,7 @@ class Transformer(keras.layers.Layer):
         self.encoder = Encoder(
             vocab_size=vocab_size,
             d_model=d_model,
+            n_heads=n_heads,
             ff_size=ff_size,
             dropout_rate=dropout_rate,
             norm_eps=NORM_EPS,
@@ -682,9 +686,10 @@ class Transformer(keras.layers.Layer):
             rel_pos_unique_per_head=rel_pos_unique_per_head,
             name='encoder')
 
-        self.decoder = Deocder(
+        self.decoder = Decoder(
             vocab_size=vocab_size,
             d_model=d_model,
+            n_heads=n_heads,
             ff_size=ff_size,
             dropout_rate=dropout_rate,
             maxlen=maxlen,
@@ -713,15 +718,17 @@ class Transformer(keras.layers.Layer):
             Tensor<[B, L_dec, E], float32> if ret_embedding.
             Tensor<[B, L_dec, V], int32> if not ret_embedding.
         """
+        enc_pad_bias = seq_to_padding_bias(enc_input)
         enc_out = self.encoder(
-            enc_input, self_attn_bias='padding_bias', training=training)
+            enc_input, self_attn_bias=enc_pad_bias, training=training)
+
         
         dec_out = self.decoder(
             dec_input,
             self_attn_bias='causal_bias',
             training=training,
-            context=enc_input,
-            ctx_attn_bias='padding_bias',
+            context=enc_out,
+            ctx_attn_bias=enc_pad_bias,
             cache=None,
             offsets=offsets,
             ret_embedding=ret_embedding)
@@ -737,12 +744,13 @@ class Transformer(keras.layers.Layer):
             x: [B, L_enc]
             prefix_or_sos: <[B, L_prefix]> | <[B]> | <[]>
         """
+        enc_pad_bias = seq_to_padding_bias(x)
         # [B, L, E]
-        enc_out = self.encoder(
-            enc_input, self_attn_bias='padding_bias', training=training)
-        B, L, E = tf.shape(enc_out)
+        enc_out = self.encoder(x, self_attn_bias=enc_pad_bias, training=False)
+        B, L, E = (tf.shape(enc_out)[i] for i in range(3))
         K = beam_size
 
+        prefix_or_sos = tf.convert_to_tensor(prefix_or_sos)
         if len(prefix_or_sos.get_shape().as_list()) == 2:
             # [B, L_prefix], [B]
             prefix, offsets = transfer_padding_to_left(prefix_or_sos)
@@ -754,8 +762,12 @@ class Transformer(keras.layers.Layer):
         # [B * K, L, E]
         rep_enc_out = tf.repeat(enc_out, K, axis=0)
 
+        # [B * K, ...]
+        rep_enc_pad_bias = tf.repeat(enc_pad_bias, K, axis=0)
+
         # [B * K]
         rep_offsets = None if offsets is None else tf.repeat(offsets, K, axis=0)
+
 
         maxlen = self.maxlen if maxlen is None else min(self.maxlen, maxlen)
 
@@ -768,7 +780,7 @@ class Transformer(keras.layers.Layer):
                 self_attn_bias='causal_bias',
                 training=False,
                 context=rep_enc_out,
-                ctx_attn_bias='padding_bias',
+                ctx_attn_bias=rep_enc_pad_bias,
                 cache=cache,
                 offsets=rep_offsets
             )
@@ -787,7 +799,6 @@ class Transformer(keras.layers.Layer):
         
         # [B, K, L_out], [B, K]
         paths, scores = beam_search(
-            batch_size=B,
             get_logits_fn=get_logits_fn,
             update_state_fn=update_state_fn,
             sos=sos,
@@ -816,6 +827,7 @@ class Transformer(keras.layers.Layer):
         return cls(
             vocab_size=c['vocab_size'],
             d_model=c['d_model'],
+            n_heads=c['n_heads'],
             maxlen=c['maxlen'],
             ff_size=c['ff_size'],
             dropout_rate=c['dropout_rate'],

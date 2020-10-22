@@ -2,7 +2,6 @@ import sys
 from logging import getLogger; logger = getLogger(__name__)
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow import math
 import numpy as np
 
 INF = 1e9
@@ -69,16 +68,18 @@ def beam_search(
     # [B, K] Sequence log probability
     slogp = tf.concat([tf.fill([B, 1], 0.0), tf.fill([B, K - 1], -INF)], axis=1)
     # [B, K] Sequence score (=slogp if no length penalty is used)
-    score = tf.identity(logps)
+    score = tf.identity(slogp)
     # [B, K]
     closed = tf.fill([B, K], False)
     # [B]
     maxlen = BCT(maxlen, [B])
 
     i = tf.constant(0)
-    while not math.reduce_all(closed):
-        shape_inv = [(paths, tf.TensorShape([None, K, None]))] \
-            + (shape_invariants or [])
+
+    shape_inv = [(paths, tf.TensorShape([None, K, None]))] \
+        + (shape_invariants if shape_invariants is not None else [])
+
+    while ~tf.math.reduce_all(closed):
         tf.autograph.experimental.set_loop_options(shape_invariants=shape_inv)
 
         # [B * K, V]
@@ -94,7 +95,7 @@ def beam_search(
         ], axis=-1)
         t_logp = tf.where(i + 1 >= maxlen[:, None, None], non_eos_bias, t_logp)
         # Set logp=0 for already closed paths
-        t_logp = tf.where(closed[:, None], 0, t_logp)
+        t_logp = tf.where(closed[:, :, None], 0.0, t_logp)
 
         # new sequence logp and score
         t_slogp = slogp[:, :, None] + t_logp
@@ -104,8 +105,8 @@ def beam_search(
         values, indices = tf.math.top_k(
             tf.reshape(t_score, [B, -1]), k=K, sorted=False)
         # [B, K]
-        alive_path_ids = tf.math.floormod(indices, tf.shape(t_score)[-1])
-        new_token_ids = indices // tf.shape(t_score)[-1]
+        alive_path_ids = indices // tf.shape(t_score)[-1]
+        new_token_ids = indices % tf.shape(t_score)[-1]
 
         # Update loop variables
         old_close = tf.gather(closed, alive_path_ids, batch_dims=1)

@@ -1,5 +1,6 @@
 from logging import getLogger; logger = getLogger(__name__)
 from logging import basicConfig, ERROR, WARNING, INFO, DEBUG, NOTSET
+import sys
 import random
 import argparse
 import json
@@ -18,7 +19,12 @@ from ..custom_text_data_pipeline.core import *
 from ..custom_text_data_pipeline.vocabulary import Vocabulary
 
 
-@tf.function
+TSpec = tf.TensorSpec
+TCastI = lambda x: tf.cast(x, tf.int32)
+TCastI64 = lambda x: tf.cast(x, tf.int64)
+TCastF = lambda x: tf.cast(x, tf.float32)
+
+
 def get_mask(y, dtype=tf.float32):
     return tf.cast(y != 0, dtype)
 
@@ -53,7 +59,8 @@ def count_toks(seqs, dtype=tf.float32):
 
 
 def count_corr(pred, y, dtype=tf.float32):
-    return tf.reduce_sum(tf.cast(pred == y & y != 0, dtype))
+    pred = tf.cast(pred, tf.int32)
+    return tf.reduce_sum(tf.cast((pred == y) &(y != 0), dtype))
 
 
 def count_corr_from_logits(logits, y):
@@ -68,13 +75,8 @@ def count_corr_from_logits(logits, y):
 
 
 def accuracy(logits, y):
-    count_corr_from_logits(logits, y) / count_toks(y)
+    return count_corr_from_logits(logits, y) / count_toks(y)
 
-
-def sequential_map_reduce_sum(fn, inputs):
-    add_fn = lambda *x: tf.math.add_n(x)
-    return map_structure(add_fn, *sequential_map(fn, inputs))
-    
 
 def distributed_map_reduce_sum(fn, inputs):
     add_fn = lambda *x: tf.math.add_n(x)
@@ -82,6 +84,7 @@ def distributed_map_reduce_sum(fn, inputs):
 
 
 def learning_rate(d_model, step, warmup):
+    d_model, step, warmup = map(TCastF, (d_model, step, warmup))
     return d_model ** (-0.5) * tf.minimum(step ** -0.5, step * (warmup ** -1.5))
 
 
@@ -179,14 +182,20 @@ class Train:
         self.vocab_src = source_vocab
         self.vocab_trg = target_vocab
 
+        def calc_loss_(logits, y, loss):
+            return loss
+
+        def calc_accuracy_(logits, y, loss):
+            return accuracy(logits, y)
+
         self.metrics = {
             'loss': {
-                'calc': lambda logits, y, loss: loss,
+                'calc': calc_loss_,
                 'train_mean': keras.metrics.Mean(),
                 'dev_mean': keras.metrics.Mean()
             },
             'accuracy': {
-                'calc': lambda logits, y, loss: accuracy(logits, y),
+                'calc': calc_accuracy_,
                 'train_mean': keras.metrics.Mean(),
                 'dev_mean': keras.metrics.Mean()
             }
@@ -223,11 +232,12 @@ class Train:
 
 
     def calc_metrics(self, batch):
-        if tf.size(batch) > 0:
-            x, y = batch
+        x, y = batch
+        if tf.size(x) > 0:
             y_i, y_o = y[:, :-1], y[:, 1:]
             logits = self.model(x, y_i, training=False)
-            loss = loss_norm(logits, y_o, ls_eps=self.eps)
+            loss = loss_norm(
+                logits, y_o, ls_eps=self.train_config['label_smoothing'])
             metrics = {k: v['calc'](logits, y_o, loss)
                 for k, v in self.metrics.items()}
         else:
@@ -243,9 +253,9 @@ class Train:
         Returns:
             (grad: Gradient, metrics: list<Tensor>, n_tokens: tf.int32)
         """
-        if tf.size(batch) > 0:
+        x, y = batch
+        if tf.size(x) > 0:
             tc = self.train_config
-            x, y = batch
             y_i, y_o = y[:, :-1], y[:, 1:]
             with tf.GradientTape() as tape:
                 logits = self.model(x, y_i, training=True)
@@ -262,7 +272,7 @@ class Train:
         return grad, metrics
 
 
-    @tf.function
+    @tf.function(input_signature=[(TSpec([None, None], tf.int32),) * 2])
     def train_step(self, inputs):
         """
         Args:
@@ -278,7 +288,7 @@ class Train:
             v['train_mean'].update_state(metrics[k])
     
 
-    @tf.function()
+    @tf.function(input_signature=[(TSpec([None, None], tf.int32),) * 2])
     def dev_step(self, inputs):
         metrics = self.calc_metrics(inputs)
 
@@ -295,15 +305,15 @@ class Train:
     
 
     def write_dev_metrics(self, writer, step):
-        with writer.as_default:
+        with writer.as_default():
             for name, m in self.metrics.items():
-                tf.summary.scalar(f'{name}_dev', m['dev_mean'], step=step)
+                tf.summary.scalar(f'{name}_dev', m['dev_mean'].result(), step=TCastI64(step))
 
 
     def write_and_reset_train_metrics(self, writer, step):
-        with writer.as_default:
+        with writer.as_default():
             for name, m in self.metrics.items():
-                tf.summary.scalar(f'{name}_train', m['train_mean'], step=step)
+                tf.summary.scalar(f'{name}_train', m['train_mean'].result(), step=TCastI64(step))
                 m['train_mean'].reset_states()
 
 
@@ -327,7 +337,7 @@ class Train:
             return x
 
 
-    @tf.function(input_signature=[tf.TensorSpec([], tf.int32)])
+    @tf.function(input_signature=[tf.TensorSpec([None, None], tf.int32)])
     def translate_step(self, x):
         """
         Args:
@@ -339,15 +349,15 @@ class Train:
     def compute_bleu(self, dataset):
         """Compute BLEU on subwords"""
 
-        refs, hyps = []
+        refs, hyps = [], []
 
         for batch in dataset:
             x, y = batch
             pred = self.translate_step(x)
-            refs.extend(self.vocab_trg.IDs2text(y).numpy())
-            hyps.extend(self.vocab_trg.IDs2text(pred).numpy())
+            refs.extend(self.vocab_trg.IDs2text(y.numpy()))
+            hyps.extend(self.vocab_trg.IDs2text(pred.numpy()))
         
-        refs = [[line.split()] for lien in refs]
+        refs = [[line.split()] for line in refs]
         hyps = [line.split() for line in hyps]
 
         return corpus_bleu(refs, hyps)
@@ -437,7 +447,7 @@ class Train:
 
 
 
-    def train():
+    def train(self):
         tc = self.train_config
 
         # Random
@@ -456,8 +466,8 @@ class Train:
         loc_step = tf.Variable(0, dtype=tf.int32) # Steps reset in every epoch
 
         # Optimizer
-        optimizer = tf.keras.optimizers.Adam(
-            lambda: learning_rate(step, self.model.d_model, tc['warm_up_step']),
+        self.optimizer = tf.keras.optimizers.Adam(
+            lambda: learning_rate(self.model.d_model, step, tc['warm_up_step']),
             beta_1=0.9, beta_2=0.98, epsilon=1e-9)
         
         # Early Stopping
@@ -471,7 +481,7 @@ class Train:
             epoch=epoch,
             step=step,
             loc_step=loc_step,
-            optimizer=optimizer,
+            optimizer=self.optimizer,
             model=self.model
         )
 
@@ -507,17 +517,23 @@ class Train:
             if epoch_ < epoch:
                 continue
             
-            set_random_seed(rnd.random())
+            set_random_seed(rnd.randrange(0xFFFF))
             
             # Epoch Loop
+            t = time.time()
             for loc_step_, data in enumerate(train_dataset):
                 if loc_step_ < loc_step:
                     continue
                 
-                self.train_step(data, optimizer)
+                self.train_step(data)
 
                 step.assign_add(1)
                 loc_step.assign_add(1)
+
+                t_ = time.time()
+                t, dt = t_, t_ - t
+                sys.stdout.write(f'Step: {step.numpy()}, Time elapsed: {dt}\n')
+                sys.stdout.flush()
 
                 # Summary
                 if step.numpy() % tc['summary_interval'] == 0:
@@ -530,13 +546,16 @@ class Train:
             # Epoch Summary
             self.update_dev_metrics(dev_dataset)
             self.write_dev_metrics(writer, step)
+            loss = self.metrics['loss']['dev_mean'].result()
             bleu = self.compute_bleu(dev_dataset)
             with writer.as_default():
-                tf.summary.scalar('BLEU', bleu)
+                tf.summary.scalar('BLEU', bleu, step=TCastI64(step))
+
+            logger.info(f'Epoch {epoch.numpy()}, Loss: {loss}, BLEU: {bleu}')
             
             # Early Stopping
             if tc['early_stopping_criterion'] == 'loss':
-                score_ = self.metrics['loss']['dev_mean']
+                score_ = loss
             else:
                 score_ = bleu
 
@@ -555,7 +574,6 @@ class Train:
     
 
     def check_dataset(self, dataset):
-        
         @tf.function(input_signature=[dataset.element_spec])
         def toks_(batch):
             return tf.math.add_n([count_toks(x) for x in nest.flatten(batch)])
@@ -638,7 +656,6 @@ class TrainMultiGPULegacy(Train):
             return super().dataset_from_gen(gen).map(split)
 
 
-    @tf.function
     def train_step(self, inputs):
         """
         Args:
@@ -647,56 +664,74 @@ class TrainMultiGPULegacy(Train):
                 x: Tensor<[B, L_src], int32>
                 y: Tensor<[B, L_trg], int32>
         """
-        inputs = [inputs[i: i + self.accums]
-            for i in range(0, self.accums * self.gpus, self.accums)]
+        spec = TSpec([None, None], tf.int32),
+        @tf.function(input_signature=[((spec,) * 2) * self.gpus * self.accums])
+        def train_step_(inputs):
+            inputs = [inputs[i: i + self.accums]
+                for i in range(0, self.accums * self.gpus, self.accums)]
 
-        def accum_fn(batches):
-            g_ms = sequential_map(self.calc_grad_metrics, batches)
-            ntoks = sequential_map(lambda b: count_toks(b[0][:, 1:]), batches)
-            return weighted_avg(g_ms, ntoks)
+            def accum_fn(batches):
+                g_ms = sequential_map(self.calc_grad_metrics, batches)
+                ntoks = sequential_map(lambda b: count_toks(b[0][:, 1:]), batches)
+                return weighted_avg(g_ms, ntoks)
 
-        g_ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
-        (grad, metrics), ntok = weighted_avg(g_ms, ntoks)
+            g_ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
+            (grad, metrics), ntok = weighted_avg(g_ms, ntoks)
 
-        # Update parameters
-        self.optimizer.apply_gradients(zip(grad, self.model.trainable_variables))
-        
-        # Update train metrics
-        for name, m in self.metrics.items():
-            m['train_mean'].update_state(metrics[name])
+            # Update parameters
+            self.optimizer.apply_gradients(zip(grad, self.model.trainable_variables))
+            
+            # Update train metrics
+            for name, m in self.metrics.items():
+                m['train_mean'].update_state(metrics[name])
+
+        self.train_step = train_step_
+        self.train_step(inputs)
     
 
-    @tf.function
     def dev_step(self, inputs):
-        inputs = [inputs[i: i + self.accums]
-            for i in range(0, self.accums * self.gpus, self.accums)]
+        spec = TSpec([None, None], tf.int32),
 
-        def accum_fn(batches):
-            ms = sequential_map(self.calc_metrics, batches)
-            ntoks = sequential_map(lambda b: count_toks(b[0][:, 1:]), batches)
-            return weighted_avg(ms, ntoks)
+        @tf.function(input_signature=[((spec,) * 2) * self.gpus * self.accums])
+        def dev_step_(inputs):
+            inputs = [inputs[i: i + self.accums]
+                for i in range(0, self.accums * self.gpus, self.accums)]
 
-        ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
-        metrics, ntok = weighted_avg(ms, ntoks)
+            def accum_fn(batches):
+                ms = sequential_map(self.calc_metrics, batches)
+                ntoks = sequential_map(lambda b: count_toks(b[0][:, 1:]), batches)
+                return weighted_avg(ms, ntoks)
 
-        for name, m in self.metrics.items():
-            m['dev_mean'].update_state(metrics[name])
+            ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
+            metrics, ntok = weighted_avg(ms, ntoks)
+
+            for name, m in self.metrics.items():
+                m['dev_mean'].update_state(metrics[name])
+
+        self.dev_step = dev_step_
+        self.dev_step(inputs)
     
 
-    @tf.function(input_signature=[tf.TensorSpec([], tf.int32)])
     def translate_step(self, xs):
         """
         Args:
             xs: <[B, L]>[N_gpu * N_accum]
         """
-        xs = [xs[i: i + self.accums]
-            for i in range(0, self.accums * self.gpus, self.accums)]
+        spec = TSpec([None, None], tf.int32),
 
-        def accum_fn(xs):
-            return sequential_map(self.translate_batch, xs)
-        accum_fn = lambda x: split_sequential_map_concat(fn, x, self.accums)
-        y = split_distr_map_concat(accum_fn, x, self.gpus)
-        return y
+        @tf.function(input_signature=[((spec,) * 2) * self.gpus * self.accums])
+        def translate_step(xs):
+            xs = [xs[i: i + self.accums]
+                for i in range(0, self.accums * self.gpus, self.accums)]
+
+            def accum_fn(xs):
+                return sequential_map(self.translate_batch, xs)
+            accum_fn = lambda x: split_sequential_map_concat(fn, x, self.accums)
+            y = split_distr_map_concat(accum_fn, x, self.gpus)
+            return y
+
+        self.translate_step = translate_step_
+        return self.translate_step(xs)
 
 
 def main(argv):
@@ -704,16 +739,19 @@ def main(argv):
     parser.add_argument('--dir', '-d', type=str, default='.')
     parser.add_argument('--n_gpus', type=int)
     parser.add_argument('--n_accums', type=int)
-    parser.add_argument('--seed', type=int)
     parser.add_argument('--mode', type=str,
         choices=['train', 'check_data', 'debug'], default='train')
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--debug_base_class', action='store_true')
     parser.add_argument('--debug_post_split', action='store_true')
+    parser.add_argument('--debug_eager_function', action='store_true')
     
     args = parser.parse_args(argv)
 
     basicConfig(level=DEBUG if args.debug else INFO)
+
+    if args.debug_eager_function:
+        tf.config.run_functions_eagerly(True)
 
     if args.mode == 'train':
         # Configs
@@ -826,4 +864,4 @@ def main(argv):
 
 
 if __name__ == '__main__':
-    main(sys.argv)
+    main(sys.argv[1:])
