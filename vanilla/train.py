@@ -14,8 +14,9 @@ import numpy as np
 from nltk.translate.bleu_score import corpus_bleu
 
 from .layers import Transformer, label_smoothing
-from ..utils.multi_gpu import *
-from ..custom_text_data_pipeline.core import *
+from ..utils import multi_gpu as mg
+from ..custom_text_data_pipeline import core as dp
+
 from ..custom_text_data_pipeline.vocabulary import Vocabulary
 
 
@@ -80,7 +81,7 @@ def accuracy(logits, y):
 
 def distributed_map_reduce_sum(fn, inputs):
     add_fn = lambda *x: tf.math.add_n(x)
-    return map_structure(add_fn , *distr_map(fn, inputs))
+    return map_structure(add_fn , *mg.distr_map(fn, inputs))
 
 
 def learning_rate(d_model, step, warmup):
@@ -206,18 +207,18 @@ class Train:
         bc = self.train_config['batch']
 
         # How to read lines from multiple files (default: no interleaving)
-        pfn['line_from_files_multi'] = gen_line_from_files_multi
+        pfn['line_from_files_multi'] = dp.gen_line_from_files_multi
 
         # Length smoothing
         if bc['length_smoothing'] is None:
             pfn['length_smoothing'] = lambda x: x
             pfn['post_ls_shuffle'] = lambda x: x
         elif bc['length_smoothing']['method'] == 'segsort':
-            pfn['length_smoothing'] = lambda x: gen_segment_sort(
+            pfn['length_smoothing'] = lambda x: dp.gen_segment_sort(
                 x,
                 segsize=bc['length_smoothing']['segsize'],
                 key=lambda seqs: len(seqs[0]))
-            pfn['post_ls_shuffle'] = lambda x: gen_random_sample(
+            pfn['post_ls_shuffle'] = lambda x: dp.gen_random_sample(
                 x,
                 bufsize=bc['length_smoothing']['post_shuf_buf_size'])
         else:
@@ -225,10 +226,10 @@ class Train:
         
         # Batching
         if bc['constraint'] == 'size':
-            pfn['batching'] = lambda x: gen_batch_multi(x, bc['size'])
+            pfn['batching'] = lambda x: dp.gen_batch_multi(x, bc['size'])
         else:
             pfn['batching'] = \
-                lambda x: gen_batch_of_capacity_multi(x, bc['size'])
+                lambda x: dp.gen_batch_of_capacity_multi(x, bc['size'])
 
 
     def calc_metrics(self, batch):
@@ -369,15 +370,15 @@ class Train:
         pfn = self.pipeline_fns
                     
         return (
-            ChainableGenerator(
+            dp.ChainableGenerator(
                 lambda: zip(dc['source_train'], dc['target_train']))
-            .trans(gen_random_sample)
+            .trans(dp.gen_random_sample)
             .trans(pfn['line_from_files_multi'])
-            .trans(gen_line2IDs_multi, (self.vocab_src, self.vocab_trg))
-            .trans(gen_random_sample, bufsize=bc['shuffle_buffer_size'])
+            .trans(dp.gen_line2IDs_multi, (self.vocab_src, self.vocab_trg))
+            .trans(dp.gen_random_sample, bufsize=bc['shuffle_buffer_size'])
             .trans(pfn['length_smoothing'])
             .trans(pfn['batching'])
-            .trans(gen_pad_batch_multi)
+            .trans(dp.gen_pad_batch_multi)
             .trans(pfn['post_ls_shuffle'])
         )
 
@@ -388,12 +389,12 @@ class Train:
         pfn = self.pipeline_fns
         
         return (
-            ChainableGenerator.zip(
-                lambda: gen_line_from_file(dc['source_dev']),
-                lambda: gen_line_from_file(dc['target_dev']))
-            .trans(gen_line2IDs_multi, (self.vocab_src, self.vocab_trg))
+            dp.ChainableGenerator.zip(
+                lambda: dp.gen_line_from_file(dc['source_dev']),
+                lambda: dp.gen_line_from_file(dc['target_dev']))
+            .trans(dp.gen_line2IDs_multi, (self.vocab_src, self.vocab_trg))
             .trans(pfn['batching'])
-            .trans(gen_pad_batch_multi)
+            .trans(dp.gen_pad_batch_multi)
         )
     
 
@@ -411,15 +412,15 @@ class Train:
             pfn = self.pipeline_fns
 
             gen = (
-                ChainableGenerator(
+                dp.ChainableGenerator(
                     lambda: zip(dc['source_train'], dc['target_train']))
-                .trans(gen_random_sample)
+                .trans(dp.gen_random_sample)
                 .trans(pfn['line_from_files_multi'])
-                .trans(gen_line2IDs_multi, (self.vocab_src, self.vocab_trg))
-                .trans(gen_random_sample, bufsize=bc['shuffle_buffer_size'])
+                .trans(dp.gen_line2IDs_multi, (self.vocab_src, self.vocab_trg))
+                .trans(dp.gen_random_sample, bufsize=bc['shuffle_buffer_size'])
                 .trans(pfn['length_smoothing'])
                 .trans(pfn['batching'])
-                .trans(gen_pad_batch_multi)
+                .trans(dp.gen_pad_batch_multi)
                 .map(lambda x: (len(x[0]),len(x[1]), len(x[0][0])))
                 #.trans(pfn['post_ls_shuffle'])
             )
@@ -434,15 +435,15 @@ class Train:
             exit(0)
             if self.split_type == 'small_minibatch':
                 gen = gen \
-                    .map(lambda x: list2numpy_nested(x)) \
-                    .trans(gen_fold, nsplit, (np.zeros([0, 0]),) * 2)
+                    .map(lambda x: dp.list2numpy_nested(x)) \
+                    .trans(dp.gen_fold, nsplit, (np.zeros([0, 0]),) * 2)
                 it = gen()
                 for x in it:
                     print(nest.map_structure(lambda v: v.shape, x))
                 exit(0)
                 return super().dataset_from_gen(gen, ((None, None),) * nsplit)
             else:
-                split = lambda *x: non_even_split(x, nsplit)
+                split = lambda *x: mg.non_even_split(x, nsplit)
                 return super().dataset_from_gen(gen).map(split)
 
 
@@ -463,7 +464,7 @@ class Train:
         # Step Counters
         epoch = tf.Variable(0, dtype=tf.int32)
         step = tf.Variable(0, dtype=tf.int32)
-        loc_step = tf.Variable(0, dtype=tf.int32) # Steps reset in every epoch
+        loc_step = tf.Variable(-1, dtype=tf.int32) # Steps reset in every epoch
 
         # Optimizer
         self.optimizer = tf.keras.optimizers.Adam(
@@ -508,13 +509,16 @@ class Train:
             ckpt.restore(manager.latest_checkpoint)
         else:
             logger.info('Checkpoint was not found')
+
+        start_epoch = epoch.numpy()
+        start_loc_step = loc_step.numpy()
         
         # Summary
         writer = tf.summary.create_file_writer(f'{self.logdir}/summary')
 
         # Training Loop
         for epoch_ in range(tc['max_epoch']):
-            if epoch_ < epoch:
+            if epoch_ < start_epoch:
                 continue
             
             set_random_seed(rnd.randrange(0xFFFF))
@@ -522,13 +526,16 @@ class Train:
             # Epoch Loop
             t = time.time()
             for loc_step_, data in enumerate(train_dataset):
-                if loc_step_ < loc_step:
+                sys.stdout.flush()
+                if loc_step_ < start_loc_step:
                     continue
+                elif loc_step_ == start_loc_step:
+                    start_loc_step = -1
+
                 
                 self.train_step(data)
 
                 step.assign_add(1)
-                loc_step.assign_add(1)
 
                 t_ = time.time()
                 t, dt = t_, t_ - t
@@ -542,11 +549,13 @@ class Train:
                     self.write_and_reset_train_metrics(writer, step)
                 
             epoch.assign_add(1)
+            loc_step.assign(0)
 
             # Epoch Summary
             self.update_dev_metrics(dev_dataset)
             self.write_dev_metrics(writer, step)
             loss = self.metrics['loss']['dev_mean'].result()
+            logger.info('Computing BLEU')
             bleu = self.compute_bleu(dev_dataset)
             with writer.as_default():
                 tf.summary.scalar('BLEU', bleu, step=TCastI64(step))
@@ -555,22 +564,27 @@ class Train:
             
             # Early Stopping
             if tc['early_stopping_criterion'] == 'loss':
-                score_ = loss
+                score_ = -loss
             else:
                 score_ = bleu
 
             # Checkpoint depending on early stopping test
-            if score_ > early_stopping['best_score']:
+            print(score_, early_stopping['best_score'].numpy())
+            sys.stdout.flush()
+            if score_ > early_stopping['best_score'].numpy():
                 early_stopping['best_score'].assign(score_)
                 early_stopping['best_epoch'].assign(epoch)
 
-                manager.save(step)
+                logger.info('Updating the best checkpoint')
                 manager_best.save(step)
             elif epoch - early_stopping['best_epoch'] \
                     > tc['early_stopping_patience']:
                 manager.save(step)
                 logger.info('Early Stopping')
                 break
+
+            logger.info('Checkpointing')
+            manager.save(step)
     
 
     def check_dataset(self, dataset):
@@ -633,10 +647,10 @@ class TrainMultiGPULegacy(Train):
             n = self.gpus * self.accums
             bc = self.train_config['batch']
             if bc['constraint'] == 'size':
-                pfn['batching'] = lambda x: gen_batch_multi(x, bc['size'] // n)
+                pfn['batching'] = lambda x: dp.gen_batch_multi(x, bc['size'] // n)
             else:
                 pfn['batching'] = \
-                    lambda x: gen_batch_of_capacity_multi(x, bc['size'] // n)
+                    lambda x: dp.gen_batch_of_capacity_multi(x, bc['size'] // n)
         elif split_type == 'divide_batch':
             pass
         else:
@@ -648,11 +662,11 @@ class TrainMultiGPULegacy(Train):
 
         if self.split_type == 'small_minibatch':
             gen = gen \
-                .map(lambda x: list2numpy_nested(x)) \
-                .trans(gen_fold, nsplit, (np.zeros([0, 0]),) * 2)
+                .map(lambda x: dp.list2numpy_nested(x)) \
+                .trans(dp.gen_fold, nsplit, (np.zeros([0, 0]),) * 2)
             return super().dataset_from_gen(gen, ((None, None),) * nsplit)
         else:
-            split = lambda *x: non_even_split(x, nsplit)
+            split = lambda *x: mg.non_even_split(x, nsplit)
             return super().dataset_from_gen(gen).map(split)
 
 
@@ -671,8 +685,8 @@ class TrainMultiGPULegacy(Train):
                 for i in range(0, self.accums * self.gpus, self.accums)]
 
             def accum_fn(batches):
-                g_ms = sequential_map(self.calc_grad_metrics, batches)
-                ntoks = sequential_map(lambda b: count_toks(b[0][:, 1:]), batches)
+                g_ms = mg.sequential_map(self.calc_grad_metrics, batches)
+                ntoks = mg.sequential_map(lambda b: count_toks(b[0][:, 1:]), batches)
                 return weighted_avg(g_ms, ntoks)
 
             g_ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
@@ -698,8 +712,8 @@ class TrainMultiGPULegacy(Train):
                 for i in range(0, self.accums * self.gpus, self.accums)]
 
             def accum_fn(batches):
-                ms = sequential_map(self.calc_metrics, batches)
-                ntoks = sequential_map(lambda b: count_toks(b[0][:, 1:]), batches)
+                ms = mg.sequential_map(self.calc_metrics, batches)
+                ntoks = mg.sequential_map(lambda b: count_toks(b[0][:, 1:]), batches)
                 return weighted_avg(ms, ntoks)
 
             ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
@@ -725,9 +739,9 @@ class TrainMultiGPULegacy(Train):
                 for i in range(0, self.accums * self.gpus, self.accums)]
 
             def accum_fn(xs):
-                return sequential_map(self.translate_batch, xs)
-            accum_fn = lambda x: split_sequential_map_concat(fn, x, self.accums)
-            y = split_distr_map_concat(accum_fn, x, self.gpus)
+                return mg.sequential_map(self.translate_batch, xs)
+            accum_fn = lambda x: mg.split_sequential_map_concat(fn, x, self.accums)
+            y = mg.split_distr_map_concat(accum_fn, x, self.gpus)
             return y
 
         self.translate_step = translate_step_
