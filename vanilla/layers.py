@@ -2,6 +2,7 @@ from logging import getLogger; logger = getLogger(__name__)
 import numpy as numpy
 import tensorflow as tf
 from tensorflow import keras
+from tensorflow import nest
 
 from ..utils.beam_search import beam_search
 from .relative_position import RelativePositionMultiheadSelfAttention
@@ -233,12 +234,12 @@ class MultiheadAttention(keras.layers.Layer):
     def create_cache(self, batch_size):
         """
         Returns:
-            (cache: dict, shape_invariant: list<tuple<Tensor, Shape>>)
+            (cache: dict, shape_invariant: dict)
         """
         k = tf.zeros([batch_size, 0, self.d_model])
         v = tf.zeros([batch_size, 0, self.d_model])
         shape = tf.TensorShape([None, None, self.d_model])
-        return {'k': k, 'v': v}, [(k, shape), (v, shape)]
+        return {'k': k, 'v': v}, {'k': shape, 'v': shape}
     
 
     def permute_cache(self, cache, ids):
@@ -618,11 +619,11 @@ class Decoder(keras.layers.Layer):
 
     def create_cache(self, batch_size):
         cache = {'cur_pos': tf.constant(0)}
-        shape_inv = []
+        shape = {'cur_pos': tf.TensorShape([])}
         for i, block in enumerate(self.blocks):
-            cache[f'layer_{i}'], sinv = block.create_cache(batch_size)
-            shape_inv.extend(sinv)
-        return cache, shape_inv
+            key = f'layer_{i}'
+            cache[key], shape[key] = block.create_cache(batch_size)
+        return cache, shape
 
 
     def permute_cache(self, cache, ids):
@@ -785,11 +786,18 @@ class Transformer(keras.layers.Layer):
             if not dummy:
                 return tf.nn.log_softmax(logits)
         
-        def update_state_fn(batch_permutation):
+        def perm_batch_fn(batch_permutation):
             """
             x: <[B * K], int32>
             """
             self.decoder.permute_cache(cache, batch_permutation)
+
+        def get_state_fn():
+            return cache
+
+        def put_controlled_state_fn(cache_):
+            nonlocal cache
+            cache = cache_
 
         # Initial call of decoder with the prefixes
         if prefix is not None:
@@ -798,12 +806,14 @@ class Transformer(keras.layers.Layer):
         # [B, K, L_out], [B, K]
         paths, scores = beam_search(
             get_logits_fn=get_logits_fn,
-            update_state_fn=update_state_fn,
+            perm_batch_fn=perm_batch_fn,
             sos=sos,
             eos=eos,
             beam_size=beam_size,
             maxlen=maxlen,
             pad=0,
+            get_state_fn=get_state_fn,
+            put_controlled_state_fn=put_controlled_state_fn,
             shape_invariants=shape_inv,
             length_penalty_fn=length_penalty_fn
         )

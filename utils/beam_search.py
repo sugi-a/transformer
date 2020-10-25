@@ -6,6 +6,7 @@ import numpy as np
 
 INF = 1e9
 BCT = tf.broadcast_to
+TShape = tf.TensorShape
 
 def length_penalty(length, alpha):
     """
@@ -20,12 +21,14 @@ def length_penalty(length, alpha):
 
 def beam_search(
         get_logits_fn,
-        update_state_fn,
+        perm_batch_fn,
         sos,
         eos,
         beam_size,
         maxlen,
         pad=0,
+        get_state_fn=None,
+        put_controlled_state_fn=None,
         shape_invariants=None,
         length_penalty_fn=None
         ):
@@ -46,10 +49,12 @@ def beam_search(
                 Output is the token scores over the vocabulary, which must be
                 log-scale score (normalized or unnormalized logits).
                 Sequence score is computed as a sum of the token scores.
-        update_state_fn:
+        perm_batch_fn:
             (alive_path_ids: <[B * K], int32> => void)
         sos: Integer[B] | <[B], int32>
         maxlen: Integer | Tensor<([]|[B]), int32>
+        get_state_fn: ()=>Nested_state<Tensor>
+        put_controlled_state_fn: (controlled_state: Nested_state<Tensor>)=>void
         shape_invariants:
             List<Tuple<<Tensor<any>, TensorShape>>> | None
         length_penalty_fn: callable | None
@@ -73,14 +78,18 @@ def beam_search(
     closed = tf.fill([B, K], False)
     # [B]
     maxlen = BCT(maxlen, [B])
-
     i = tf.constant(0)
 
-    shape_inv = [(paths, tf.TensorShape([None, K, None]))] \
-        + (shape_invariants if shape_invariants is not None else [])
+    # External state (if exists)
+    assert (get_state_fn is None) == (put_controlled_state_fn is None)
+    ex_state = None if get_state_fn is None else get_state_fn()
+
+    shape_inv = [(ex_state, shape_invariants), (paths, TShape([None, K, None]))]
 
     while ~tf.math.reduce_all(closed):
         tf.autograph.experimental.set_loop_options(shape_invariants=shape_inv)
+        if put_controlled_state_fn is not None:
+            put_controlled_state_fn(ex_state)
 
         # [B * K, V]
         t_logp = get_logits_fn(tf.reshape(paths, [B * K, -1])[:, -1:])[:, 0]
@@ -111,9 +120,10 @@ def beam_search(
         # 0 <= x < V
         new_token_ids = top_indices % tf.shape(t_score)[-1]
 
-        # Update loop variables
+
+        # Update loop states
         old_close = tf.gather(closed, alive_path_ids, batch_dims=1)
-        update_state_fn(
+        perm_batch_fn(
             tf.reshape(alive_path_ids + tf.range(B)[:, None] * K, [-1]))
 
         # [B, K, L+1] <- [B, K, L]
@@ -127,8 +137,12 @@ def beam_search(
             tf.reshape(t_slogp, [B, -1]), top_indices, batch_dims=1)
         score = top_score
         closed = old_close | (new_token_ids == eos)
-
         i += 1
+
+        # Update external state (if exists)
+        if ex_state is not None:
+            ex_state = get_state_fn()
+
 
     # Sort
     score, indices = tf.math.top_k(score, K, sorted=True)
