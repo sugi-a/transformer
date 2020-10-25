@@ -166,8 +166,11 @@ def sequential_map(fn, list_x, out_dtype):
 
     for i in tf.range(N):
         tf.autograph.experimental.set_loop_options(parallel_iterations=1)
+        x = nest.map_structure(lambda a: a.read(i), i_arrays)
+        y = fn(x)
         o_arrays = nest.map_structure(
-            lambda a, v: a.write(i, fn(v)), o_arrays, i_arrays)
+            lambda a, y_: a.write(i, y_),
+            o_arrays, y)
     
     return [nest.map_structure(lambda a: a.read(i), o_arrays) for i in range(N)]
 
