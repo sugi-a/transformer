@@ -101,24 +101,31 @@ def beam_search(
         t_slogp = slogp[:, :, None] + t_logp
         t_score = t_slogp / length_penalty_fn(i + 1)
 
-        # [B, K, V] -> [B, K * V] -> [B, K] Top K
-        values, indices = tf.math.top_k(
+        # [B, K, V] -> [B, K * V] -> [B, K] Top K.
+        top_score, top_indices = tf.math.top_k(
             tf.reshape(t_score, [B, -1]), k=K, sorted=False)
+
         # [B, K]
-        alive_path_ids = indices // tf.shape(t_score)[-1]
-        new_token_ids = indices % tf.shape(t_score)[-1]
+        # 0 <= x < K
+        alive_path_ids = top_indices // tf.shape(t_score)[-1]
+        # 0 <= x < V
+        new_token_ids = top_indices % tf.shape(t_score)[-1]
 
         # Update loop variables
         old_close = tf.gather(closed, alive_path_ids, batch_dims=1)
         update_state_fn(
             tf.reshape(alive_path_ids + tf.range(B)[:, None] * K, [-1]))
+
+        # [B, K, L+1] <- [B, K, L]
         paths = tf.concat([
                 tf.gather(paths, alive_path_ids, batch_dims=1),
                 tf.where(old_close, pad, new_token_ids)[:, :, None]
             ], axis=2)
+
+        # [B, K] <- [B, K*V] <- [B, K, V]
         slogp = tf.gather(
-            tf.reshape(t_slogp, [B, -1]), alive_path_ids, batch_dims=1)
-        score = values
+            tf.reshape(t_slogp, [B, -1]), top_indices, batch_dims=1)
+        score = top_score
         closed = old_close | (new_token_ids == eos)
 
         i += 1

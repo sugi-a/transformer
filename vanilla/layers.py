@@ -87,7 +87,7 @@ def create_causal_mask(length):
     Returns:
         [1, 1, length, length], float32.
         """
-    mat = tf.sequence_mask(tf.range(length), length, tf.float32)
+    mat = tf.sequence_mask(tf.range(length) + 1, length, tf.float32)
     return mat[None, None]
 
 
@@ -355,11 +355,9 @@ class Encoder(keras.layers.Layer):
 
         self.d_model = d_model
         self.in_emb = EmbeddingLayer(vocab_size, d_model, scale=True)
-        self.pos_emb = self.add_weight(
-            name='pos_emb', shape=[maxlen, d_model], dtype=tf.float32) \
-            if use_pos_emb else None
-        self.pos_enc = positional_encoding(maxlen, d_model) \
-            if use_rel_pos else None
+        if use_pos_enc: self.pos_enc = positional_encoding(maxlen, d_model)
+        if use_pos_emb: self.pos_emb = self.add_weight(
+            name='pos_emb', shape=[maxlen, d_model], dtype=tf.float32)
         self.post_emb_dropout = keras.layers.Dropout(dropout_rate)
         if not use_rel_pos:
             self.blocks = [
@@ -395,10 +393,10 @@ class Encoder(keras.layers.Layer):
         # Embedding [batch, length, emb_size]
         y = self.in_emb(x)
 
-        if self.pos_enc is not None:
+        if hasattr(self, 'pos_enc'):
             y += self.pos_enc[:tf.shape(y)[1]]
 
-        if self.pos_emb is not None:
+        if hasattr(self, 'pos_emb'):
             y += self.pos_emb[:tf.shape(y)[1]]
 
         y = self.post_emb_dropout(y, training=training)
@@ -497,12 +495,10 @@ class Decoder(keras.layers.Layer):
         else:
             self.in_emb = EmbeddingLayer(vocab_size, d_model, scale=True)
         
-        self.pos_emb = self.add_weight(
-            name='pos_emb', shape=[maxlen, d_model], dtype=tf.float32) \
-            if use_pos_emb else None
-        self.pos_enc = positional_encoding(maxlen, d_model) \
-            if use_pos_enc else None
-        
+        if use_pos_enc: self.pos_enc = positional_encoding(maxlen, d_model)
+        if use_pos_emb: self.pos_emb = self.add_weight(
+            name='pos_emb', shape=[maxlen, d_model], dtype=tf.float32)
+
         self.post_emb_dropout = keras.layers.Dropout(dropout_rate)
 
         if not use_rel_pos:
@@ -576,8 +572,8 @@ class Decoder(keras.layers.Layer):
 
         # Adjust the position-related tensors
         if offsets is None:
-            pos_enc = self.pos_enc[l: r] if self.pos_enc is not None else None
-            pos_emb = self.pos_emb[l: r] if self.pos_emb is not None else None
+            pos_enc = self.pos_enc[l: r] if hasattr(self, 'pos_enc') else None
+            pos_emb = self.pos_emb[l: r] if hasattr(self, 'pos_emb') else None
         else:
             # [B, 1, 1, r] offset bias
             offset_bias = -INF * tf.sequence_mask(
@@ -587,8 +583,10 @@ class Decoder(keras.layers.Layer):
 
             # [ML, E] -> [B, r-l, E]
             indices = tf.range(l, r)[None] + offsets[:, None]
-            pos_enc = tf.gather(self.pos_enc, indices) if self.pos_enc else None
-            pos_emb = tf.gather(self.pos_emb, indices) if self.pos_emb else None
+            pos_enc = tf.gather(self.pos_enc, indices) \
+                if hasattr(self, 'pos_enc') else None
+            pos_emb = tf.gather(self.pos_emb, indices) \
+                if hasattr(self, 'pos_emb') else None
 
 
         # Start of graph construction
