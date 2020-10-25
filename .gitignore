@@ -3,3 +3,6 @@ __*
 /test.txt
 /test_dir/
 node_modules/
+/*temp
+/*temp_*
+/*temp.*
