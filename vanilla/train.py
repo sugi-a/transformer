@@ -30,6 +30,28 @@ def get_mask(y, dtype=tf.float32):
     return tf.cast(y != 0, dtype)
 
 
+def sparse_softmax_xent_loss(labels, logits, eps):
+    """Sparse softmax crossentropy loss with label smoothing
+    An implementation which is theoretically efficient.
+    Args:
+        labels: [B, L]
+        logits: [B, L, V]
+        eps: float
+    Returns:
+        [B, L]
+        SXENT(P, Q) = E_P[-log Q]
+        P = smooth(onehot(labels))
+        log(Q) = log_softmax(logits)
+    """
+    logp = tf.nn.log_softmax(logits)
+    if eps == 0:
+        return -tf.gather(logp, labels, batch_dims=2)
+    else:
+        a = tf.reduce_mean(logp, axis=-1)
+        b = tf.gather(logp, labels, batch_dims=2)
+        return -(eps * a + (1 - eps) * b)
+
+
 def loss_additive(logits, y, ls_eps):
     """Unnormalized (not divided by the number of tokens) loss.
     Args:
@@ -38,9 +60,10 @@ def loss_additive(logits, y, ls_eps):
     Returns:
         loss: <[], tf.float32>
     """
-    V = tf.shape(logits)[-1]
-    label = label_smoothing(tf.one_hot(y, V), ls_eps)
-    loss = tf.nn.softmax_cross_entropy_with_logits(label, logits)
+    #V = tf.shape(logits)[-1]
+    #label = label_smoothing(tf.one_hot(y, V), ls_eps)
+    #loss = tf.nn.softmax_cross_entropy_with_logits(label, logits)
+    loss = sparse_softmax_xent_loss(y, logits, ls_eps)
     return tf.reduce_sum(loss * get_mask(y))
 
 
@@ -285,8 +308,9 @@ class Train:
 
         self.optimizer.apply_gradients(zip(g, self.model.trainable_variables))
         
+        ntoks = count_toks(inputs[1][:, 1:])
         for k,v in self.metrics.items():
-            v['train_mean'].update_state(metrics[k])
+            v['train_mean'].update_state(metrics[k], ntoks)
     
 
     @tf.function(input_signature=[(TSpec([None, None], tf.int32),) * 2])
@@ -294,7 +318,7 @@ class Train:
         metrics = self.calc_metrics(inputs)
 
         for k,v in self.metrics.items():
-            v['dev_mean'].update_state(metrics[k])
+            v['dev_mean'].update_state(metrics[k], count_toks(inputs[1][:,1:]))
     
 
     def update_dev_metrics(self, dev_dataset):
@@ -406,46 +430,31 @@ class Train:
 
 
     def unit_test(self, i):
+        ckpt = tf.train.Checkpoint(model=self.model)
+        lst_ckpt = tf.train.latest_checkpoint(f'{self.logdir}/checkpoint_best')
+        logger.debug('Restoring' f'{lst_ckpt}')
+        ckpt.restore(lst_ckpt)
+        logger.debug('Restored')
         if i == 0:
-            bc = self.train_config['batch']
-            dc = self.train_config['data']
-            pfn = self.pipeline_fns
+            dataset = self.dataset_from_gen(self.create_dev_data_gen(), (None, None))
 
-            gen = (
-                dp.ChainableGenerator(
-                    lambda: zip(dc['source_train'], dc['target_train']))
-                .trans(dp.gen_random_sample)
-                .trans(pfn['line_from_files_multi'])
-                .trans(dp.gen_line2IDs_multi, (self.vocab_src, self.vocab_trg))
-                .trans(dp.gen_random_sample, bufsize=bc['shuffle_buffer_size'])
-                .trans(pfn['length_smoothing'])
-                .trans(pfn['batching'])
-                .trans(dp.gen_pad_batch_multi)
-                .map(lambda x: (len(x[0]),len(x[1]), len(x[0][0])))
-                #.trans(pfn['post_ls_shuffle'])
-            )
-                        
-            for x in gen():
-                print(x)
-        elif i == 1:
-            nsplit = self.gpus * self.accums
-            gen = self.create_train_data_gen()
-            for x,y in gen():
-                print(len(x), len(y), (len(x[0]) + len(y[0])) * len(x))
-            exit(0)
-            if self.split_type == 'small_minibatch':
-                gen = gen \
-                    .map(lambda x: dp.list2numpy_nested(x)) \
-                    .trans(dp.gen_fold, nsplit, (np.zeros([0, 0]),) * 2)
-                it = gen()
-                for x in it:
-                    print(nest.map_structure(lambda v: v.shape, x))
-                exit(0)
-                return super().dataset_from_gen(gen, ((None, None),) * nsplit)
-            else:
-                split = lambda *x: mg.non_even_split(x, nsplit)
-                return super().dataset_from_gen(gen).map(split)
+            refs, hyps = [], []
 
+            t = time.time()
+            for batch in dataset:
+                x, y = batch
+                pred = self.translate_step(x)
+                hyps.extend(self.vocab_trg.IDs2text(pred.numpy()))
+                refs.extend(self.vocab_trg.IDs2text(y.numpy()))
+                for hyp in hyps:
+                    print(hyp)
+                t, dt = time.time(), time.time() - t
+                logger.debug(dt)
+
+            
+            refs = [[line.split()] for line in refs]
+            hyps = [line.split() for line in hyps]
+            logger.info(corpus_bleu(refs, hyps))
 
 
     def train(self):
@@ -464,7 +473,7 @@ class Train:
         # Step Counters
         epoch = tf.Variable(0, dtype=tf.int32)
         step = tf.Variable(0, dtype=tf.int32)
-        loc_step = tf.Variable(-1, dtype=tf.int32) # Steps reset in every epoch
+        loc_step = tf.Variable(0, dtype=tf.int32) # Steps reset in every epoch
 
         # Optimizer
         self.optimizer = tf.keras.optimizers.Adam(
@@ -472,10 +481,8 @@ class Train:
             beta_1=0.9, beta_2=0.98, epsilon=1e-9)
         
         # Early Stopping
-        early_stopping = {
-            'best_epoch': tf.Variable(0, dtype=tf.int32),
-            'best_score': tf.Variable(0.0)
-        }
+        best_epoch = tf.Variable(0, dtype=tf.int32)
+        best_score = tf.Variable(-1e10)
 
         # Checkpoint and Managers
         ckpt = tf.train.Checkpoint(
@@ -483,7 +490,9 @@ class Train:
             step=step,
             loc_step=loc_step,
             optimizer=self.optimizer,
-            model=self.model
+            model=self.model,
+            best_epoch=best_epoch,
+            best_score=best_score
         )
 
         ckpt_best = tf.train.Checkpoint(
@@ -507,6 +516,13 @@ class Train:
         if manager.latest_checkpoint:
             logger.info(f'Restoring from {manager.latest_checkpoint}')
             ckpt.restore(manager.latest_checkpoint)
+            logger.info(
+                f'Epoch: {epoch.numpy()},\n'
+                f'Step: {step.numpy()}\n'
+                f'Best Checkpoint: \n'
+                f'\tEpoch: {best_epoch.numpy()}\n'
+                f'\tScore: {best_score.numpy()}\n'
+            )
         else:
             logger.info('Checkpoint was not found')
 
@@ -517,6 +533,7 @@ class Train:
         writer = tf.summary.create_file_writer(f'{self.logdir}/summary')
 
         # Training Loop
+        logger.debug('Train Loop Starts')
         for epoch_ in range(tc['max_epoch']):
             if epoch_ < start_epoch:
                 continue
@@ -526,7 +543,6 @@ class Train:
             # Epoch Loop
             t = time.time()
             for loc_step_, data in enumerate(train_dataset):
-                sys.stdout.flush()
                 if loc_step_ < start_loc_step:
                     continue
                 elif loc_step_ == start_loc_step:
@@ -554,7 +570,7 @@ class Train:
             # Epoch Summary
             self.update_dev_metrics(dev_dataset)
             self.write_dev_metrics(writer, step)
-            loss = self.metrics['loss']['dev_mean'].result()
+            loss = self.metrics['loss']['dev_mean'].result().numpy()
             logger.info('Computing BLEU')
             bleu = self.compute_bleu(dev_dataset)
             with writer.as_default():
@@ -569,16 +585,15 @@ class Train:
                 score_ = bleu
 
             # Checkpoint depending on early stopping test
-            print(score_, early_stopping['best_score'].numpy())
-            sys.stdout.flush()
-            if score_ > early_stopping['best_score'].numpy():
-                early_stopping['best_score'].assign(score_)
-                early_stopping['best_epoch'].assign(epoch)
+                logger.debug(
+                    f'Last Best: {best_score.numpy()}, This time: {score_}')
+            if score_ > best_score.numpy():
+                best_score.assign(score_)
+                best_epoch.assign(epoch)
 
                 logger.info('Updating the best checkpoint')
                 manager_best.save(step)
-            elif epoch - early_stopping['best_epoch'] \
-                    > tc['early_stopping_patience']:
+            elif epoch - best_epoch > tc['early_stopping_patience']:
                 manager.save(step)
                 logger.info('Early Stopping')
                 break
@@ -844,6 +859,9 @@ def main(argv):
         print('Dev Dataset')
         trainer.check_dataset(dev_dataset)
     elif args.mode == 'debug':
+        with open(f'{args.dir}/model_config.json') as f:
+            model_config = json.load(f)
+
         with open(f'{args.dir}/train_config.json') as f:
             train_config = json.load(f)
 
@@ -854,24 +872,24 @@ def main(argv):
         
         if args.debug_base_class:
             trainer = Train(
-                model=None,
+                model=Transformer.from_config(model_config),
                 source_vocab=vocab_src,
                 target_vocab=vocab_trg,
                 train_config=train_config,
-                logdir=None)
+                logdir=args.dir)
         else:
             trainer = TrainMultiGPULegacy(
-                model=None,
+                model=Transformer.from_config(model_config),
                 source_vocab=vocab_src,
                 target_vocab=vocab_trg,
                 train_config=train_config,
-                logdir=None,
+                logdir=args.dir,
                 gpus=args.n_gpus,
                 accums=args.n_accums,
                 split_type='divide_batch' \
                     if args.debug_post_split else 'small_minibatch')
         
-        trainer.unit_test(1)
+        trainer.unit_test(0)
         
     else:
         raise Exception('Invalid parameter')
