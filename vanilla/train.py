@@ -187,7 +187,30 @@ class Stats:
             'std': self.std,
             'n': self.n
         }
-    
+
+
+def deco_function_oneshot_shape_inv(f):
+    graph_fn = None
+
+    def get_spec_(t):
+        rank = len(t.shape.as_list())
+        return tf.TensorSpec([None] * rank, t.dtype)
+
+    def f_(*args):
+        nonlocal graph_fn
+        if graph_fn is None:
+            sig = nest.map_structure(get_spec_, args)
+            graph_fn = tf.function(f, input_signature=sig)
+
+        return graph_fn(*args)
+
+    return f_
+
+
+def get_output_dtypes(fn, *args, **kwargs):
+    outs = fn(*args, **kwargs)
+    return nest.map_structure(lambda x: x.dtype, outs)
+
 
 class Train:
     def __init__(
@@ -296,14 +319,8 @@ class Train:
         return grad, metrics
 
 
-    @tf.function(input_signature=[(TSpec([None, None], tf.int32),) * 2])
+    @deco_function_oneshot_shape_inv
     def train_step(self, inputs):
-        """
-        Args:
-            inputs: (x, y)
-                x: Tensor<[B, L_src], int32>
-                y: Tensor<[B, L_trg], int32>
-        """
         g, metrics = self.calc_grad_metrics(inputs)
 
         self.optimizer.apply_gradients(zip(g, self.model.trainable_variables))
@@ -313,7 +330,7 @@ class Train:
             v['train_mean'].update_state(metrics[k], ntoks)
     
 
-    @tf.function(input_signature=[(TSpec([None, None], tf.int32),) * 2])
+    @deco_function_oneshot_shape_inv
     def dev_step(self, inputs):
         metrics = self.calc_metrics(inputs)
 
@@ -362,13 +379,13 @@ class Train:
             return x
 
 
-    @tf.function(input_signature=[tf.TensorSpec([None, None], tf.int32)])
-    def translate_step(self, x):
+    @deco_function_oneshot_shape_inv
+    def translate_step(self, inputs):
         """
         Args:
-            x: [B, L]
+            inputs: ([B, L_x], [B, L_y])
         """
-        return self.translate_batch(x)
+        return y, self.translate_batch(x)
 
 
     def compute_bleu(self, dataset):
@@ -377,10 +394,11 @@ class Train:
         refs, hyps = [], []
 
         for batch in dataset:
-            x, y = batch
-            pred = self.translate_step(x)
-            refs.extend(self.vocab_trg.IDs2text(y.numpy()))
-            hyps.extend(self.vocab_trg.IDs2text(pred.numpy()))
+            y, pred = self.translate_step(batch)
+            for y_ in nest.flatten(y):
+                refs.extend(self.vocab_trg.IDs2text(y_.numpy()))
+            for pred_ in nest.flatten(pred):
+                hyps.extend(self.vocab_trg.IDs2text(pred_.numpy()))
         
         refs = [[line.split()] for line in refs]
         hyps = [line.split() for line in hyps]
@@ -652,7 +670,7 @@ class TrainMultiGPULegacy(Train):
         vis_gpus = get_visible_gpus()
         self.gpus = vis_gpus if gpus is None else gpus
         logger.debug(f'Number of GPUs: {self.gpus}')
-            
+
         self.accums = 1 if accums is None else accums
 
         self.split_type = split_type
@@ -670,22 +688,28 @@ class TrainMultiGPULegacy(Train):
             pass
         else:
             raise Exception('Invalid parameter')
+        
+        # Dry-run the model to instantiate variables
+        self.model(tf.zeros([1, 1]), tf.zeros(1, 1))
     
 
     def dataset_from_gen(self, gen):
-        nsplit = self.gpus * self.accums
+        w, h = self.accums, self.gpus
+        n = w * h
 
         if self.split_type == 'small_minibatch':
             gen = gen \
                 .map(lambda x: dp.list2numpy_nested(x)) \
-                .trans(dp.gen_fold, nsplit, (np.zeros([0, 0]),) * 2)
-            return super().dataset_from_gen(gen, ((None, None),) * nsplit)
+                .trans(dp.gen_fold, n, (np.zeros([0, 0]),) * 2) \
+            dataset = super().dataset_from_gen(gen, ((None,)*2,) * n)
         else:
-            split = lambda *x: mg.non_even_split(x, nsplit)
-            return super().dataset_from_gen(gen).map(split)
+            dataset = super().dataset_from_gen(gen) \
+                .map(lambda *x: mg.non_even_split(x, n))
+
+        return dataset.map(lambda x: tuple(dp.gen_fold(x, h)))
 
 
-    def train_step(self, inputs):
+    def calc_grad_metrics(self, inputs):
         """
         Args:
             inputs:
@@ -693,74 +717,54 @@ class TrainMultiGPULegacy(Train):
                 x: Tensor<[B, L_src], int32>
                 y: Tensor<[B, L_trg], int32>
         """
-        spec = TSpec([None, None], tf.int32),
-        @tf.function(input_signature=[((spec,) * 2) * self.gpus * self.accums])
-        def train_step_(inputs):
-            inputs = [inputs[i: i + self.accums]
-                for i in range(0, self.accums * self.gpus, self.accums)]
+        core_fn = super().calc_grad_metrics
+        o_dtypes = get_output_dtypes(core_fn, batches[0][0])
+        count_fn = lambda b: count_toks(b[1][:, 1:], tf.float32)
 
-            def accum_fn(batches):
-                g_ms = mg.sequential_map(self.calc_grad_metrics, batches)
-                ntoks = mg.sequential_map(lambda b: count_toks(b[0][:, 1:]), batches)
-                return weighted_avg(g_ms, ntoks)
+        def accum_fn(batches):
+            g_ms = mg.sequential_map(core_fn, batches, o_dtypes)
+            ntoks = mg.sequential_map(count_fn, batches, tf.float32)
+            return weighted_avg(g_ms, ntoks)
 
-            g_ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
-            (grad, metrics), ntok = weighted_avg(g_ms, ntoks)
+        g_ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
+        g_ms, _ = weighted_avg(g_ms, ntoks)
 
-            # Update parameters
-            self.optimizer.apply_gradients(zip(grad, self.model.trainable_variables))
-            
-            # Update train metrics
-            for name, m in self.metrics.items():
-                m['train_mean'].update_state(metrics[name])
+        return g_ms
 
-        self.train_step = train_step_
-        self.train_step(inputs)
+
+    def calc_metrics(self, inputs):
+        core_fn = super().calc_metrics
+        o_dtypes = get_output_dtypes(core_fn, batches[0][0])
+        count_fn = lambda b: count_toks(b[1][:, 1:], tf.float32)
+        
+        def accum_fn(batches):
+            ms = mg.sequential_map(core_fn, batches, o_dtypes)
+            ntoks = mg.sequential_map(count_fn, batches, tf.float32)
+            return weighted_avg(ms, ntoks)
+        
+        ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
+        ms, _ = weighted_avg(ms, ntoks)
+
+        return ms
     
 
-    def dev_step(self, inputs):
-        spec = TSpec([None, None], tf.int32),
-
-        @tf.function(input_signature=[((spec,) * 2) * self.gpus * self.accums])
-        def dev_step_(inputs):
-            inputs = [inputs[i: i + self.accums]
-                for i in range(0, self.accums * self.gpus, self.accums)]
-
-            def accum_fn(batches):
-                ms = mg.sequential_map(self.calc_metrics, batches)
-                ntoks = mg.sequential_map(lambda b: count_toks(b[0][:, 1:]), batches)
-                return weighted_avg(ms, ntoks)
-
-            ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
-            metrics, ntok = weighted_avg(ms, ntoks)
-
-            for name, m in self.metrics.items():
-                m['dev_mean'].update_state(metrics[name])
-
-        self.dev_step = dev_step_
-        self.dev_step(inputs)
-    
-
-    def translate_step(self, xs):
+    @deco_function_oneshot_shape_inv
+    def translate_step(self, inputs):
         """
         Args:
             xs: <[B, L]>[N_gpu * N_accum]
         """
+        xs = [[b[0] for b in row] for row in inputs]
+        ys = [[b[1] for b in row] for row in inputs]
         spec = TSpec([None, None], tf.int32),
 
-        @tf.function(input_signature=[((spec,) * 2) * self.gpus * self.accums])
-        def translate_step(xs):
-            xs = [xs[i: i + self.accums]
-                for i in range(0, self.accums * self.gpus, self.accums)]
+        o_dtypes = get_output_dtypes(self.translate_batch, xs[0][0])
 
-            def accum_fn(xs):
-                return mg.sequential_map(self.translate_batch, xs)
-            accum_fn = lambda x: mg.split_sequential_map_concat(fn, x, self.accums)
-            y = mg.split_distr_map_concat(accum_fn, x, self.gpus)
-            return y
-
-        self.translate_step = translate_step_
-        return self.translate_step(xs)
+        def accum_fn(xs):
+            return mg.sequential_map(self.translate_batch, xs, o_dtypes)
+        
+        pred = mg.distr_map(accum_fn, xs)
+        return ys, pred
 
 
 def main(argv):
