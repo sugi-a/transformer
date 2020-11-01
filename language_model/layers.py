@@ -21,6 +21,7 @@ class DecoderLanguageModel(keras.layers.Layer):
             n_blocks,
             rel_pos_max_dist=None,
             rel_pos_unique_per_head=None):
+        super().__init__()
             
         NORM_EPS = 1e-6 # epsilon of layer norm
 
@@ -57,7 +58,7 @@ class DecoderLanguageModel(keras.layers.Layer):
 
 
     def call(self, x, training, offsets=None):
-        y = self.decoder(
+        return self.decoder(
             x,
             self_attn_bias='causal_bias',
             training=training,

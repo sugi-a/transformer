@@ -1,32 +1,53 @@
-from logging import getLogger, DEBUG, basicConfig; logger = getLogger(__name__)
+from logging import getLogger; logger = getLogger(__name__)
+from logging import DEBUG, INFO, basicConfig
 import os, sys, argparse, time, json
+import itertools
+import random
+from collections import deque
 
 import tensorflow as tf
 from tensorflow import keras, nest
 import numpy as np
 
-from . import datasetloader
 from .layers import DecoderLanguageModel 
-from ..custom_text_data_pipeline import dataprocessing as dp
+from ..utils import multi_gpu as mg
+from ..custom_text_data_pipeline import core as dp
+from ..custom_text_data_pipeline.vocabulary import Vocabulary
 from ..vanilla.train import \
-    sparse_softmax_xent_loss \
-    get_mask \
-    deco_function_oneshot_shape_inv \
-    get_visible_gpus \
-    get_vocabs_from_config
+    sparse_softmax_xent_loss, \
+    get_mask, \
+    deco_function_oneshot_shape_inv, \
+    get_visible_gpus, \
+    Stats, \
+    count_toks, \
+    get_output_specs_shape_inv, \
+    weighted_avg, \
+    learning_rate
 
 
 TShape = tf.TensorShape
+
+
+def get_vocabs_from_config(config):
+    return Vocabulary(
+        vocab_file=config['dict'],
+        PAD_ID=config['PAD_ID'],
+        EOS_ID=config['EOS_ID'],
+        UNK_ID=config['UNK_ID'],
+        SOS_ID=config['SOS_ID'])
 
 
 def gen_doc_from_lines(seq_iterable):
     doc = []
     for seq in seq_iterable:
         if len(seq) == 0:
-            yield doc
+            if len(doc) > 0:
+                yield doc
             doc = []
         else:
             doc.append(seq)
+    if len(doc) > 0:
+        yield doc
 
 
 def gen_front_aligned_segment_from_docs(doc_iterable, window_size):
@@ -37,7 +58,7 @@ def gen_front_aligned_segment_from_docs(doc_iterable, window_size):
         for seq in doc:
             q.extend(seq)
             while len(q) >= window_size:
-                yield list(itertools.slice(q, window_size))
+                yield list(itertools.islice(q, window_size))
                 for _ in range(len(doc[k])):
                     q.popleft()
                 k += 1
@@ -75,24 +96,23 @@ class Train:
             losses = sparse_softmax_xent_loss(
                 x_o, lgts, self.train_config['label_smoothing'])
             mask = get_mask(x_o)
-            loss = tf.reduce_sum(x_o * losses) / tf.reduce_sum(mask)
+            loss = tf.reduce_sum(losses * mask) / tf.reduce_sum(mask)
         else:
-            loss = 0
+            loss = 0.0
         
         return loss
 
 
-    def calc_grad_loss(self, x):
+    def calc_grad(self, x):
         if tf.size(x) > 0:
             with tf.GradientTape() as tape:
-                loss = self.calc_loss(x, True, ls_eps)
+                loss = self.calc_loss(x, True)
             
             grad = tape.gradient(loss, self.model.trainable_variables)
         else:
-            loss = 0
-            grad = [tf.zeros_like(x) for x in self.trainable_variables]
+            grad = [tf.zeros_like(x) for x in self.model.trainable_variables]
         
-        return grad, loss
+        return grad 
     
 
     def get_batch_weight(self, batch):
@@ -101,18 +121,37 @@ class Train:
     
     @deco_function_oneshot_shape_inv
     def train_step(self, inputs):
-        g, loss = self.calc_grad_loss(inputs)
+        count_fn = lambda b: count_toks(b[:, 1:], tf.float32)
+        fn = lambda b: (self.calc_grad(b), count_fn(b))
+        o_specs = get_output_specs_shape_inv(fn, inputs[0][0])
+
+        def accum_fn(batches):
+            g, ntoks = zip(*mg.sequential_map(fn, batches, o_specs))
+            return weighted_avg(g, ntoks)
+
+        g, ntoks = zip(*mg.distr_map(accum_fn, inputs))
+        g, _ = weighted_avg(g, ntoks)
         
         self.optimizer.apply_gradients(zip(g, self.model.trainable_variables))
         
 
     @deco_function_oneshot_shape_inv
     def dev_step(self, inputs):
-        loss = self.calc_loss(inputs)
-        w = self.get_batch_weight(inputs)
-        self.dev_loss.update_state(loss, w)
+        count_fn = lambda b: count_toks(b[:, 1:], tf.float32)
+        fn = lambda b: (self.calc_loss(b, False), count_fn(b))
+        o_specs = get_output_specs_shape_inv(fn, inputs[0][0])
 
-    def update_dev_metric(self, dev_dataset):
+        def accum_fn(batches):
+            o, ntoks = zip(*mg.sequential_map(fn, batches, o_specs))
+            return weighted_avg(o, ntoks)
+
+        o, ntoks = zip(*mg.distr_map(accum_fn, inputs))
+        o, w = weighted_avg(o, ntoks)
+
+        self.dev_loss.update_state(o, w)
+
+
+    def update_dev_metrics(self, dev_dataset):
         self.dev_loss.reset_states()
 
         for data in dev_dataset:
@@ -130,7 +169,11 @@ class Train:
     def create_train_data_gen(self):
         bc = self.train_config['batch']
         dc = self.train_config['data']
-        batch_size = bc['batch_size'] // self.gpus // self.accums
+
+        w, h = self.accums, self.gpus
+        n = w * h
+
+        batch_size = bc['batch_size'] // n
 
         return (
             dp.ChainableGenerator(lambda: dc['train'])
@@ -148,17 +191,21 @@ class Train:
             .map(lambda batch: batch[0])
             .map(lambda x: dp.list2numpy_nested(x))
             .trans(dp.gen_fold, n, np.zeros([0, 0]))
-            .map(lambda b: [b[i: i+w] for i in range(0, n, w)])
+            .map(lambda b: tuple(b[i: i+w] for i in range(0, n, w)))
         )
     
 
     def create_dev_data_gen(self):
         bc = self.train_config['batch']
         dc = self.train_config['data']
-        batch_size = bc['batch_size'] // self.gpus // self.accums
+
+        w, h = self.accums, self.gpus
+        n = w * h
+
+        batch_size = bc['batch_size'] // n
 
         return (
-            dp.ChainableGenerator(dp.gen_line_from_file(dc['dev']))
+            dp.ChainableGenerator(lambda: dp.gen_line_from_file(dc['dev']))
             .trans(dp.gen_line2IDs, self.vocab)
             .trans(gen_doc_from_lines)
             .trans(
@@ -170,7 +217,7 @@ class Train:
             .map(lambda batch: batch[0])
             .map(lambda x: dp.list2numpy_nested(x))
             .trans(dp.gen_fold, n, np.zeros([0, 0]))
-            .map(lambda b: [b[i: i+w] for i in range(0, n, w)])
+            .map(lambda b: tuple(b[i: i+w] for i in range(0, n, w)))
         )
     
 
@@ -209,7 +256,7 @@ class Train:
 
         # Optimizer
         self.optimizer = tf.keras.optimizers.Adam(
-            lambda: learning_rate(self.model.d_model, step, tc['warm_up_step']),
+            lambda: learning_rate(self.model.d_model, step, tc['warm_up_steps']),
             beta_1=0.9, beta_2=0.98, epsilon=1e-9)
         
         # Early Stopping
@@ -392,7 +439,13 @@ class Train:
             print()
 
 
-def main(argv)
+    def debug(self):
+        gen = self.create_train_data_gen()
+        for d in gen():
+            a = d
+
+
+def main(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dir', '-d', type=str, default='.')
     parser.add_argument('--n_gpus', type=int)
@@ -442,8 +495,7 @@ def main(argv)
         if args.mode == 'train':
             trainer.train()
         else:
-            print('no impl')
-            exit(0)
+            trainer.debug()
 
     elif args.mode == 'check_data':
         with open(f'{args.dir}/train_config.json') as f:
