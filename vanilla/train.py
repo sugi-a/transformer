@@ -5,6 +5,7 @@ import random
 import argparse
 import json
 import time
+import itertools
 
 import tensorflow as tf
 from tensorflow import keras
@@ -392,7 +393,7 @@ class Train:
         """
         if tf.size(x) > 0:
             # [B, 1, L]
-            maxlen = 2 * tf.math.minimum(tf.shape(x)[1], 10)
+            maxlen = 2 * tf.math.maximum(tf.shape(x)[1], 10)
 
             paths, scores = self.model.beam_search_decode_with_prefix(
                 x,
@@ -482,14 +483,13 @@ class Train:
         ckpt.restore(lst_ckpt)
         logger.debug('Restored')
         if i == 0:
-            dataset = self.dataset_from_gen(self.create_dev_data_gen(), (None, None))
+            dataset = self.dataset_from_gen(self.create_dev_data_gen())
 
             refs, hyps = [], []
 
             t = time.time()
             for batch in dataset:
-                x, y = batch
-                pred = self.translate_step(x)
+                y, pred = self.translate_step(batch)
                 hyps.extend(self.vocab_trg.IDs2text(pred.numpy()))
                 refs.extend(self.vocab_trg.IDs2text(y.numpy()))
                 for hyp in hyps:
