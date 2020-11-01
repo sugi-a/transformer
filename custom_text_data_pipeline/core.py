@@ -205,7 +205,8 @@ def gen_line_from_files_multi(fnames_iter):
         yield from zip(*map(gen_line_from_file, fnames))
 
 
-def gen_fold(iterator, n, padding_for_remainder=None):
+def gen_fold(iterable, n, padding_for_remainder=None):
+    iterator = iter(iterable)
     if padding_for_remainder is None:
         while True:
             try:
