@@ -392,11 +392,14 @@ class Train:
         """
         if tf.size(x) > 0:
             # [B, 1, L]
+            maxlen = 2 * tf.math.minimum(tf.shape(x)[1], 10)
+
             paths, scores = self.model.beam_search_decode_with_prefix(
                 x,
                 prefix_or_sos=self.vocab_trg.SOS_ID,
                 eos=self.vocab_trg.EOS_ID,
-                beam_size=1)
+                beam_size=1,
+                maxlen=maxlen)
             # [B, L] <- [B, 1, L]
             return paths[:, 0]
         else:
@@ -663,7 +666,7 @@ class Train:
             # History
             _t = epoch.numpy()
             if int(_t ** 0.5) ** 2 == _t:
-                logger.log('Saving as long-term checkpoint')
+                logger.info('Saving as long-term checkpoint')
                 manager_hist.save(step)
 
             if should_early_stop:

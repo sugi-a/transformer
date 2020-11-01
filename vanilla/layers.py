@@ -694,7 +694,7 @@ class Transformer(keras.layers.Layer):
             maxlen=maxlen,
             use_pos_emb=use_pos_emb,
             use_pos_enc=use_pos_enc,
-            use_rel_pos=use_pos_emb,
+            use_rel_pos=use_rel_pos,
             n_blocks=n_dec_blocks,
             norm_eps=NORM_EPS,
             in_emb=self.encoder.in_emb if share_enc_dec_embedding else None,
@@ -736,12 +736,14 @@ class Transformer(keras.layers.Layer):
 
 
     def beam_search_decode_with_prefix(
-            self, x, prefix_or_sos, eos, beam_size, maxlen=None,
+            self, x, prefix_or_sos, eos, beam_size,
+            maxlen=None,
             length_penalty_fn=None):
         """
         Args:
             x: [B, L_enc]
             prefix_or_sos: <[B, L_prefix]> | <[B]> | <[]>
+            maxlen: None | <[B]> | <[]> | int
         """
         enc_pad_bias = seq_to_padding_bias(x)
         # [B, L, E]
@@ -758,6 +760,8 @@ class Transformer(keras.layers.Layer):
             prefix, offsets = None, None
             sos = tf.broadcast_to(prefix_or_sos, [B])
 
+        maxlen = self.maxlen if maxlen is None else tf.math.minimum(self.maxlen, maxlen)
+
         # [B * K, L, E]
         rep_enc_out = tf.repeat(enc_out, K, axis=0)
 
@@ -766,9 +770,6 @@ class Transformer(keras.layers.Layer):
 
         # [B * K]
         rep_offsets = None if offsets is None else tf.repeat(offsets, K, axis=0)
-
-
-        maxlen = self.maxlen if maxlen is None else min(self.maxlen, maxlen)
 
         # State variables
         cache, shape_inv = self.decoder.create_cache(B * K)
