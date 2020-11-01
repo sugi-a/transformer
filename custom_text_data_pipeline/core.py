@@ -106,7 +106,7 @@ def gen_batch_multi(seqs_iter, batch_size):
 
 
 def gen_batch_of_capacity_multi(
-        seqs_iter, capacity, width_fn=None, capacity_fn=None):
+        seqs_iterable, capacity, width_fn=None, capacity_fn=None):
     """
     Args:
         width_fn: (seqs: tuple<Seq>)=>int
@@ -114,25 +114,27 @@ def gen_batch_of_capacity_multi(
     Returns:
         tuple<list<Seq>>
     """
-    if width_fn is None:
-        width_fn = lambda seqs: sum(map(len, seqs))
-
     if capacity_fn is None:
-        capacity_fn = lambda w, h: w * h
+        capacity_fn = lambda ws, h: sum(ws) * h
+
+    seqs_iter = iter(seqs_iterable)
+    first = next(seqs_iter)
+    nseqs = len(first)
 
     batch = []
-    maxw = 0
+    maxws = [0] * nseqs
 
-    for seqs in seqs_iter:
-        w = width_fn(seqs)
-        assert w <= capacity
+    for seqs in itertools.chain([first], seqs_iter):
+        ws = tuple(map(len, seqs))
+        assert capacity_fn(ws, 1) <= capacity
 
-        if capacity_fn(max(maxw, w), len(batch)) > capacity:
+        maxws_ = tuple(map(max, zip(maxws, ws)))
+        if capacity_fn(maxws_, len(batch)) > capacity:
             yield tuple(map(list, zip(*batch)))
             batch = []
-            maxw = 0
+            maxws = [0] * nseqs
         
-        maxw = max(maxw, w)
+        maxws = tuple(map(max, zip(maxws, ws)))
         batch.append(seqs)
     
     if len(batch) > 0:
