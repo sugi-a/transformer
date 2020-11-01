@@ -97,7 +97,7 @@ def gen_batch_multi(seqs_iter, batch_size):
     buf = []
     for seqs in seqs_iter:
         buf.append(seqs)
-        if len(seqs) == batch_size:
+        if len(buf) == batch_size:
             yield tuple(map(list, zip(*buf)))
             buf = []
 
