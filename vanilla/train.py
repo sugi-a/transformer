@@ -17,8 +17,6 @@ from .layers import Transformer, label_smoothing
 from ..utils import multi_gpu as mg
 from ..custom_text_data_pipeline import core as dp
 from ..custom_text_data_pipeline.vocabulary import Vocabulary
-from ..utils import checkpoint as ckpt_lib
-
 
 TSpec = tf.TensorSpec
 TCastI = lambda x: tf.cast(x, tf.int32)
