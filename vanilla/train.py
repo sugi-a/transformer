@@ -16,8 +16,8 @@ from nltk.translate.bleu_score import corpus_bleu
 from .layers import Transformer, label_smoothing
 from ..utils import multi_gpu as mg
 from ..custom_text_data_pipeline import core as dp
-
 from ..custom_text_data_pipeline.vocabulary import Vocabulary
+from ..utils import checkpoint as ckpt_lib
 
 
 TSpec = tf.TensorSpec
@@ -530,6 +530,8 @@ class Train:
         best_score = tf.Variable(-1e10)
 
         # Checkpoint and Managers
+
+        # Main checkpoint
         ckpt = tf.train.Checkpoint(
             epoch=epoch,
             step=step,
@@ -540,28 +542,38 @@ class Train:
             best_score=best_score
         )
 
+        # Main manager
+        manager = tf.train.CheckpointManager(
+            ckpt,
+            directory=f'{self.logdir}/checkpoint',
+            max_to_keep=1,
+            step_counter=step)
+        
+        # Manger for long-term history
+        manager_hist = tf.train.CheckpointManager(
+            ckpt,
+            directory=f'{self.logdir}/checkpoint_history',
+            max_to_keep=None,
+            step_counter=step)
+
+        # Checkpoint for recording the best epoch
         ckpt_best = tf.train.Checkpoint(
             epoch=epoch,
             step=step,
             model=self.model
         )
 
-        manager = tf.train.CheckpointManager(
-            ckpt,
-            directory=f'{self.logdir}/checkpoint',
-            max_to_keep=None,
-            step_counter=step)
-
         manager_best = tf.train.CheckpointManager(
             ckpt_best,
             directory=f'{self.logdir}/checkpoint_best',
-            max_to_keep=2,
+            max_to_keep=3,
             step_counter=step)
         
         if manager.latest_checkpoint:
             logger.info(f'Restoring from {manager.latest_checkpoint}')
             ckpt.restore(manager.latest_checkpoint)
             logger.info(
+                f'Restored\n'
                 f'Epoch: {epoch.numpy()},\n'
                 f'Step: {step.numpy()}\n'
                 f'Best Checkpoint: \n'
@@ -608,14 +620,18 @@ class Train:
                     self.update_dev_metrics(dev_dataset)
                     self.write_dev_metrics(writer, step)
                     self.write_and_reset_train_metrics(writer, step)
+
                 
             epoch.assign_add(1)
             loc_step.assign(0)
 
             # Epoch Summary
+            # Basic summary
             self.update_dev_metrics(dev_dataset)
             self.write_dev_metrics(writer, step)
             loss = self.metrics['loss']['dev_mean'].result().numpy()
+
+            # BLEU
             logger.info('Computing BLEU')
             bleu = self.compute_bleu(dev_dataset)
             with writer.as_default():
@@ -629,9 +645,10 @@ class Train:
             else:
                 score_ = bleu
 
-            # Checkpoint depending on early stopping test
-                logger.debug(
-                    f'Last Best: {best_score.numpy()}, This time: {score_}')
+            logger.debug(
+                f'Last Best: {best_score.numpy()}, This time: {score_}')
+
+            should_early_stop = False
             if score_ > best_score.numpy():
                 best_score.assign(score_)
                 best_epoch.assign(epoch)
@@ -639,12 +656,21 @@ class Train:
                 logger.info('Updating the best checkpoint')
                 manager_best.save(step)
             elif epoch - best_epoch > tc['early_stopping_patience']:
-                manager.save(step)
-                logger.info('Early Stopping')
-                break
+                should_early_stop = True
 
+            # Checkpoint
             logger.info('Checkpointing')
             manager.save(step)
+
+            # History
+            _t = epoch.numpy()
+            if int(_t ** 0.5) ** 2 == _t:
+                logger.log('Saving as long-term checkpoint')
+                manager_hist.save(step)
+
+            if should_early_stop:
+                logger.info('Early Stopping')
+                break
     
 
     def check_dataset(self, dataset):
