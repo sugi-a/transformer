@@ -121,7 +121,10 @@ def set_random_seed(seed):
 
 def weighted_avg(nesteds, weights):
     W = tf.math.add_n(weights)
-    ws = [w / W for w in weights]
+    if W == 0:
+        ws = [0.0 for _ in weights]
+    else:
+        ws = [w / W for w in weights]
     weighted_nesteds = [
         map_structure(lambda v: v*w, nst) for nst, w in zip(nesteds, ws)]
     fn_add = lambda *x: tf.math.add_n(x)
@@ -129,8 +132,8 @@ def weighted_avg(nesteds, weights):
 
 
 def get_visible_gpus():
-    return len(tf.config.experimental.list_physical_devices('GPU')) \
-        + len(tf.config.experimental.list_physical_devices('XLA_GPU'))
+    return len(tf.config.experimental.list_physical_devices('GPU'))
+    #len(tf.config.experimental.list_physical_devices('XLA_GPU'))
 
 
 def get_vocabs_from_config(vocab_config):
@@ -189,20 +192,32 @@ class Stats:
         }
 
 
-def deco_function_oneshot_shape_inv(f):
-    graph_fn = None
+def get_shape_inv_spec(t):
+    rank = len(t.shape.as_list())
+    return tf.TensorSpec([None]*rank, t.dtype)
 
-    def get_spec_(t):
-        rank = len(t.shape.as_list())
-        return tf.TensorSpec([None] * rank, t.dtype)
+
+def deco_function_oneshot_shape_inv(f=None, argc=1):
+    if f is None:
+        return lambda f_: deco_function_oneshot_shape_inv(f_, argc)
+
+    graph_fn = None
 
     def f_(*args):
         nonlocal graph_fn
         if graph_fn is None:
-            sig = nest.map_structure(get_spec_, args)
-            graph_fn = tf.function(f, input_signature=sig)
+            if len(args) == argc + 1:
+                inputs = args[1:]
+                wrapped = lambda *args_: f(args[0], *args_)
+            else:
+                assert len(args) == argc
+                inputs = args
+                wrapped = lambda *args_: f(*args_)
 
-        return graph_fn(*args)
+            specs = nest.map_structure(get_shape_inv_spec, inputs)
+            graph_fn = tf.function(wrapped, input_signature=specs)
+
+        return graph_fn(*args[-argc:])
 
     return f_
 
@@ -210,6 +225,11 @@ def deco_function_oneshot_shape_inv(f):
 def get_output_dtypes(fn, *args, **kwargs):
     outs = fn(*args, **kwargs)
     return nest.map_structure(lambda x: x.dtype, outs)
+
+
+def get_output_specs_shape_inv(fn, *args, **kwargs):
+    outs = fn(*args, **kwargs)
+    return nest.map_structure(lambda x: get_shape_inv_spec(x), outs)
 
 
 class Train:
@@ -313,10 +333,15 @@ class Train:
             metrics = {k: v['calc'](logits, y_o, loss)
                 for k, v in self.metrics.items()}
         else:
-            grad = map_structure(lambda x: 0.0, self.model.trainable_variables)
+            grad = map_structure(lambda x: tf.zeros_like(x), self.model.trainable_variables)
             metrics = {k: 0.0 for k in self.metrics.keys()}
 
         return grad, metrics
+    
+
+    def get_batch_weight(self, batch):
+        x, y = batch
+        return count_toks(y[:, 1:])
 
 
     @deco_function_oneshot_shape_inv
@@ -325,7 +350,7 @@ class Train:
 
         self.optimizer.apply_gradients(zip(g, self.model.trainable_variables))
         
-        ntoks = count_toks(inputs[1][:, 1:])
+        ntoks = self.get_batch_weight(inputs)
         for k,v in self.metrics.items():
             v['train_mean'].update_state(metrics[k], ntoks)
     
@@ -334,8 +359,9 @@ class Train:
     def dev_step(self, inputs):
         metrics = self.calc_metrics(inputs)
 
+        ntoks = self.get_batch_weight(inputs)
         for k,v in self.metrics.items():
-            v['dev_mean'].update_state(metrics[k], count_toks(inputs[1][:,1:]))
+            v['dev_mean'].update_state(metrics[k], ntoks)
     
 
     def update_dev_metrics(self, dev_dataset):
@@ -385,6 +411,7 @@ class Train:
         Args:
             inputs: ([B, L_x], [B, L_y])
         """
+        x, y = inputs
         return y, self.translate_batch(x)
 
 
@@ -652,6 +679,8 @@ class Train:
             for sts, score in zip(stats, scores):
                 sts.update(score)
             i += 1
+            if i % 100 == 0:
+                print(i)
 
         print(f'Steps: {i}')
         for m, sts in zip(metrics, stats):
@@ -688,9 +717,6 @@ class TrainMultiGPULegacy(Train):
             pass
         else:
             raise Exception('Invalid parameter')
-        
-        # Dry-run the model to instantiate variables
-        self.model(tf.zeros([1, 1]), tf.zeros(1, 1))
     
 
     def dataset_from_gen(self, gen):
@@ -698,15 +724,14 @@ class TrainMultiGPULegacy(Train):
         n = w * h
 
         if self.split_type == 'small_minibatch':
-            gen = gen \
-                .map(lambda x: dp.list2numpy_nested(x)) \
-                .trans(dp.gen_fold, n, (np.zeros([0, 0]),) * 2) \
+            gen = gen.map(lambda x: dp.list2numpy_nested(x)) \
+                .trans(dp.gen_fold, n, (np.zeros([0, 0]),) * 2)
             dataset = super().dataset_from_gen(gen, ((None,)*2,) * n)
         else:
             dataset = super().dataset_from_gen(gen) \
                 .map(lambda *x: mg.non_even_split(x, n))
 
-        return dataset.map(lambda x: tuple(dp.gen_fold(x, h)))
+        return dataset.map(lambda *x: [x[i:i+w] for i in range(0, n, w)])
 
 
     def calc_grad_metrics(self, inputs):
@@ -718,15 +743,16 @@ class TrainMultiGPULegacy(Train):
                 y: Tensor<[B, L_trg], int32>
         """
         core_fn = super().calc_grad_metrics
-        o_dtypes = get_output_dtypes(core_fn, batches[0][0])
         count_fn = lambda b: count_toks(b[1][:, 1:], tf.float32)
 
+        fn = lambda b: (core_fn(b), count_fn(b))
+        o_specs = get_output_specs_shape_inv(fn, inputs[0][0])
+
         def accum_fn(batches):
-            g_ms = mg.sequential_map(core_fn, batches, o_dtypes)
-            ntoks = mg.sequential_map(count_fn, batches, tf.float32)
+            g_ms, ntoks = zip(*mg.sequential_map(fn, batches, o_specs))
             return weighted_avg(g_ms, ntoks)
 
-        g_ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
+        g_ms, ntoks = zip(*mg.distr_map(accum_fn, inputs))
         g_ms, _ = weighted_avg(g_ms, ntoks)
 
         return g_ms
@@ -734,18 +760,24 @@ class TrainMultiGPULegacy(Train):
 
     def calc_metrics(self, inputs):
         core_fn = super().calc_metrics
-        o_dtypes = get_output_dtypes(core_fn, batches[0][0])
         count_fn = lambda b: count_toks(b[1][:, 1:], tf.float32)
+
+        fn = lambda b: (core_fn(b), count_fn(b))
+        o_specs = get_output_specs_shape_inv(fn, inputs[0][0])
         
         def accum_fn(batches):
-            ms = mg.sequential_map(core_fn, batches, o_dtypes)
-            ntoks = mg.sequential_map(count_fn, batches, tf.float32)
-            return weighted_avg(ms, ntoks)
+            ms, n = zip(*mg.sequential_map(fn, batches, o_specs))
+            return weighted_avg(ms, n)
         
-        ms, ntoks = distributed_map_reduce_sum(accum_fn, inputs)
+        ms, ntoks = zip(*mg.distr_map(accum_fn, inputs))
         ms, _ = weighted_avg(ms, ntoks)
 
         return ms
+
+
+    def get_batch_weight(self, batch):
+        ys = nest.flatten([[b[1] for b in row] for row in batch])
+        return tf.math.add_n([count_toks(y[:, 1:]) for y in ys])
     
 
     @deco_function_oneshot_shape_inv
@@ -758,10 +790,10 @@ class TrainMultiGPULegacy(Train):
         ys = [[b[1] for b in row] for row in inputs]
         spec = TSpec([None, None], tf.int32),
 
-        o_dtypes = get_output_dtypes(self.translate_batch, xs[0][0])
+        o_specs = get_output_specs_shape_inv(self.translate_batch, xs[0][0])
 
         def accum_fn(xs):
-            return mg.sequential_map(self.translate_batch, xs, o_dtypes)
+            return mg.sequential_map(self.translate_batch, xs, o_specs)
         
         pred = mg.distr_map(accum_fn, xs)
         return ys, pred
@@ -771,7 +803,7 @@ def main(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dir', '-d', type=str, default='.')
     parser.add_argument('--n_gpus', type=int)
-    parser.add_argument('--n_accums', type=int)
+    parser.add_argument('--accums', type=int)
     parser.add_argument('--mode', type=str,
         choices=['train', 'check_data', 'debug'], default='train')
     parser.add_argument('--debug', action='store_true')
@@ -821,7 +853,7 @@ def main(argv):
                 train_config=train_config,
                 logdir=logdir,
                 gpus=args.n_gpus,
-                accums=args.n_accums,
+                accums=args.accums,
                 split_type='divide_batch' \
                     if args.debug_post_split else 'small_minibatch')
         
@@ -850,7 +882,7 @@ def main(argv):
                 train_config=train_config,
                 logdir=None,
                 gpus=args.n_gpus,
-                accums=args.n_accums,
+                accums=args.accums,
                 split_type='divide_batch' \
                     if args.debug_post_split else 'small_minibatch')
         
@@ -889,7 +921,7 @@ def main(argv):
                 train_config=train_config,
                 logdir=args.dir,
                 gpus=args.n_gpus,
-                accums=args.n_accums,
+                accums=args.accums,
                 split_type='divide_batch' \
                     if args.debug_post_split else 'small_minibatch')
         

@@ -118,6 +118,11 @@ def split_distr_map_concat(
     return outs
 
 
+def get_shape_inv(t):
+    rank = len(t.shape.as_list())
+    return tf.TensorShape([None] * rank)
+
+
 def list2tensor_array(lst):
     """
     Args:
@@ -129,7 +134,12 @@ def list2tensor_array(lst):
     assert N > 0
 
     arrays = nest.map_structure(
-        lambda x: tf.TensorArray(x.dtype, N, infer_shape=False), lst[0])
+        lambda x: tf.TensorArray(
+            x.dtype,
+            size=N,
+            infer_shape=False,
+            element_shape=get_shape_inv(x)),
+        lst[0])
     
     for i, x in enumerate(lst):
         arrays = nest.map_structure(
@@ -138,7 +148,7 @@ def list2tensor_array(lst):
     return arrays
 
 
-def sequential_map(fn, list_x, out_dtype):
+def sequential_map(fn, list_x, out_spec):
     """
     Maps each element `x` in `list_x` by `fn(x)` sequentially,
     in which the peak memory consumption is expected to be equal
@@ -162,7 +172,12 @@ def sequential_map(fn, list_x, out_dtype):
     
     i_arrays = list2tensor_array(list_x)
     o_arrays = nest.map_structure(
-        lambda t: tf.TensorArray(t, N, infer_shape=False), out_dtype)
+        lambda s: tf.TensorArray(
+            s.dtype,
+            size=N,
+            infer_shape=False,
+            element_shape=s.shape),
+        out_spec)
 
     for i in tf.range(N):
         tf.autograph.experimental.set_loop_options(parallel_iterations=1)
