@@ -491,7 +491,7 @@ class Decoder(keras.layers.Layer):
             context=True,
             **kwargs):
         super().__init__(**kwargs)
-        if in_emb:
+        if in_emb is not None:
             self.in_emb = in_emb
         else:
             self.in_emb = EmbeddingLayer(vocab_size, d_model, scale=True)
