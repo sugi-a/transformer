@@ -168,12 +168,13 @@ class Stats:
         self.std = 0
 
 
-    def update(self, x):
-        self.sum += x
-        self.x2 += x ** 2
-        self.m = min(self.m, x)
-        self.M = max(self.M, x)
-        self.n += 1
+    def update(self, *xs):
+        for x in xs:
+            self.sum += x
+            self.x2 += x ** 2
+            self.m = min(self.m, x)
+            self.M = max(self.M, x)
+            self.n += 1
 
 
     def summarize(self):
@@ -188,6 +189,38 @@ class Stats:
             'var': self.var,
             'std': self.std,
             'n': self.n
+        }
+
+
+class StatsCorrXY:
+    def __init__(self):
+        self.reset()
+
+
+    def reset(self):
+        self.X = np.zeros(2)
+        self.X2 = np.zeros(2)
+        self.xy = 0
+        self.n = 0
+
+
+    def update(self, xs, ys):
+        for X in zip(xs, ys):
+            self.X += X
+            self.X2 += X ** 2
+            self.xy += xy
+            self.n += 1
+
+
+    def summarize(self):
+        M = self.X / self.n
+        V = self.X2 / self.n - M ** 2
+        nume = self.xy / n - M.prod()
+        deno = V.prod() ** 0.5
+        return {
+            'corr': nume / deno,
+            'means': M,
+            'stds': V ** 0.5
         }
 
 
@@ -691,9 +724,23 @@ class Train:
         def longest_(batch):
             lens = [tf.shape(x)[1] for x in nest.flatten(batch)]
             return tf.math.reduce_max(lens)
+        
+        @tf.function(input_signature=[dataset.element_spec])
+        def lens(batch):
+            len_fn = lambda x: tf.reduce_sum(get_mask(x), axis=1)
+            lens = nest.map_structure(len_fn, batch)
+            lens = nest.flatten(lens)
+            xs, ys = zip(*[flat[i: i + 2] for i in range(0, len(flat), 2)])
+            x = tf.concat(xs, axis=0)
+            y = tf.concat(ys, axis=0)
+
+            # [B], [B]
+            return x, y
+            
 
         metrics = ['Sec', 'Tokens', 'Sents', 'Capacity','Longest']
         stats = [Stats() for i in range(len(metrics))]
+        len_corr = StatsCorrXY()
         
         last_t = time.time()
         i = 0
@@ -705,6 +752,10 @@ class Train:
                 capacity_(data).numpy(), longest_(data).numpy()]
             for sts, score in zip(stats, scores):
                 sts.update(score)
+
+            l_x, l_y = lens(data)
+            len_corr.update(l_x.numpy(), l_y.numpy())
+
             i += 1
             if i % 100 == 0:
                 print(i)
@@ -716,6 +767,10 @@ class Train:
             for label, score in res.items():
                 print(f'{label}: {score}')
             print()
+
+        print('Corr')
+        print(len_corr.summarize())
+        print()
 
 
 class TrainMultiGPULegacy(Train):
