@@ -353,20 +353,16 @@ class Train:
             (grad: Gradient, metrics: list<Tensor>, n_tokens: tf.int32)
         """
         x, y = batch
-        if tf.size(x) > 0:
-            tc = self.train_config
-            y_i, y_o = y[:, :-1], y[:, 1:]
-            with tf.GradientTape() as tape:
-                logits = self.model(x, y_i, training=True)
-                loss = loss_norm(logits, y_o, ls_eps=tc['label_smoothing'])
+        tc = self.train_config
+        y_i, y_o = y[:, :-1], y[:, 1:]
+        with tf.GradientTape() as tape:
+            logits = self.model(x, y_i, training=True)
+            loss = loss_norm(logits, y_o, ls_eps=tc['label_smoothing'])
 
-            grad = tape.gradient(loss, self.model.trainable_variables)
+        grad = tape.gradient(loss, self.model.trainable_variables)
 
-            metrics = {k: v['calc'](logits, y_o, loss)
-                for k, v in self.metrics.items()}
-        else:
-            grad = map_structure(lambda x: tf.zeros_like(x), self.model.trainable_variables)
-            metrics = {k: 0.0 for k in self.metrics.keys()}
+        metrics = {k: v['calc'](logits, y_o, loss)
+            for k, v in self.metrics.items()}
 
         return grad, metrics
     

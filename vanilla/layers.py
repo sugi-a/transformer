@@ -154,7 +154,7 @@ class EmbeddingLayer(keras.layers.Layer):
 
 
     def call(self, inputs):
-        outputs = tf.nn.embedding_lookup(self.emb, inputs)
+        outputs = tf.gather(self.emb, inputs)
 
         if self.scale:
             dims = tf.cast(tf.shape(self.emb)[1], tf.float32)
