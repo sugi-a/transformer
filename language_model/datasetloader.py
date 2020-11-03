@@ -1,8 +1,80 @@
 import sys, json, random
 from logging import getLogger; logger = getLogger(__name__)
 from collections import deque
+import itertools
 
-from ..components.dataprocessing import gen_json_resumable
+from ..custom_text_data_pipeline import core as dp
+
+
+def gen_doc_from_lines(seq_iterable):
+    doc = []
+    for seq in seq_iterable:
+        if len(seq) == 0:
+            if len(doc) > 0:
+                yield doc
+            doc = []
+        else:
+            doc.append(seq)
+    if len(doc) > 0:
+        yield doc
+
+
+def gen_front_aligned_segment_from_docs(doc_iterable, window_size, stride):
+    for doc in doc_iterable:
+        for idx in range(0, len(doc), stride):
+            buf = []
+            for i in range(idx, len(doc), stride):
+                buf.extend(doc[i])
+                if len(buf) > window_size:
+                    break
+            if len(buf) < window_size:
+                yield buf
+                break
+            else:
+                yield buf[:window_size]
+
+
+
+def create_simple_batch_generator(
+        files,
+        vocab,
+        stochastic,
+        batch_capacity,
+        shuf_buf_size=None,
+        length_smoothing=None,
+        batch_shuf_buf_size=None):
+    gen = dp.ChainableGenerator(lambda: files)
+    
+    if stochastic: gen = gen.trans(dp.gen_random_sample)
+
+    gen = gen.trans(dp.gen_line_from_files)
+    gen = gen.trans(dp.gen_line2IDs, vocab)
+    
+    if stochastic:
+        gen = gen.trans(dp.gen_random_sample, shuf_buf_size)
+
+    if length_smoothing is not None:
+        gen = gen.trans(
+            dp.gen_segment_sort,
+            segsize=length_smoothing,
+            key=len)
+    
+    gen = gen.map(lambda seq: (seq,))
+    gen = gen.trans(dp.gen_batch_of_capacity_multi, batch_capacity)
+    gen = gen.trans(dp.gen_pad_batch_multi)
+    gen = gen.map(lambda seqs: seqs[0])
+
+    if batch_shuf_buf_size is not None:
+        gen = gen.trans(gen_random_sample, batch_shuf_buf_size)
+    
+    return gen
+
+
+def create_sos_aligned_multi_sent_batch_generator(
+        files,
+        vocab):
+    pass
+
 
 class MultiSentenceSlidingWindowLoader:
     def __init__(self, files, vocab, window_size, keep_remainder_larger_equal=None,

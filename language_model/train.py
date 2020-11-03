@@ -23,6 +23,8 @@ from ..vanilla.train import \
     get_output_specs_shape_inv, \
     weighted_avg, \
     learning_rate
+from .datasetloader import \
+    create_simple_batch_generator
 
 
 TShape = tf.TensorShape
@@ -35,34 +37,6 @@ def get_vocabs_from_config(config):
         EOS_ID=config['EOS_ID'],
         UNK_ID=config['UNK_ID'],
         SOS_ID=config['SOS_ID'])
-
-
-def gen_doc_from_lines(seq_iterable):
-    doc = []
-    for seq in seq_iterable:
-        if len(seq) == 0:
-            if len(doc) > 0:
-                yield doc
-            doc = []
-        else:
-            doc.append(seq)
-    if len(doc) > 0:
-        yield doc
-
-
-def gen_front_aligned_segment_from_docs(doc_iterable, window_size, stride):
-    for doc in doc_iterable:
-        for idx in range(0, len(doc), stride):
-            buf = []
-            for i in range(idx, len(doc), stride):
-                buf.extend(doc[i])
-                if len(buf) > window_size:
-                    break
-            if len(buf) < window_size:
-                yield buf
-                break
-            else:
-                yield buf[:window_size]
 
 
 class Train:
@@ -174,28 +148,20 @@ class Train:
         w, h = self.accums, self.gpus
         n = w * h
 
-        batch_size = bc['batch_size'] // n
+        capacity = bc['capacity'] // n
 
-        return (
-            dp.ChainableGenerator(lambda: dc['train'])
-            .trans(dp.gen_random_sample)
-            .trans(dp.gen_line_from_files)
-            .trans(dp.gen_line2IDs, self.vocab)
-            .trans(gen_doc_from_lines)
-            .trans(
-                gen_front_aligned_segment_from_docs,
-                window_size=bc['sampling']['window_size'],
-                stride=bc['sampling']['stride_sentences'])
-            .trans(dp.gen_random_sample, bufsize=bc['shuffle_buf_size'])
-            .map(lambda seq: (seq,))
-            .trans(dp.gen_batch_multi, batch_size)
-            .trans(dp.gen_pad_batch_multi)
-            .map(lambda batch: batch[0])
-            .map(lambda x: dp.list2numpy_nested(x))
-            .trans(dp.gen_fold, n, np.zeros([0, 0]))
+        return create_simple_batch_generator(
+                files=dc['train'],
+                vocab=self.vocab,
+                stochastic=True,
+                batch_capacity=capacity,
+                shuf_buf_size=bc['shuffle_buf_size'],
+                length_smoothing=bc['length_smoothing'],
+                batch_shuf_buf_size=bc['batch_shuf_buf_size']) \
+            .map(dp.list2numpy_nested) \
+            .trans(dp.gen_fold, n, np.zeros([0, 0])) \
             .map(lambda b: tuple(b[i: i+w] for i in range(0, n, w)))
-        )
-    
+
 
     def create_dev_data_gen(self):
         bc = self.train_config['batch']
@@ -204,25 +170,18 @@ class Train:
         w, h = self.accums, self.gpus
         n = w * h
 
-        batch_size = bc['batch_size'] // n
+        capacity = bc['capacity'] // n
 
-        return (
-            dp.ChainableGenerator(lambda: dp.gen_line_from_file(dc['dev']))
-            .trans(dp.gen_line2IDs, self.vocab)
-            .trans(gen_doc_from_lines)
-            .trans(
-                gen_front_aligned_segment_from_docs,
-                window_size=bc['sampling']['window_size'],
-                stride=bc['sampling']['window_size'])
-            .map(lambda seq: (seq,))
-            .trans(dp.gen_batch_multi, batch_size)
-            .trans(dp.gen_pad_batch_multi)
-            .map(lambda batch: batch[0])
-            .map(lambda x: dp.list2numpy_nested(x))
-            .trans(dp.gen_fold, n, np.zeros([0, 0]))
+        return create_simple_batch_generator(
+                files=[dc['dev']],
+                vocab=self.vocab,
+                stochastic=False,
+                batch_capacity=capacity,
+                length_smoothing=bc['length_smoothing']) \
+            .map(dp.list2numpy_nested) \
+            .trans(dp.gen_fold, n, np.zeros([0, 0])) \
             .map(lambda b: tuple(b[i: i+w] for i in range(0, n, w)))
-        )
-    
+
 
     def dataset_from_gen(self, gen):
         w, h = self.accums, self.gpus
