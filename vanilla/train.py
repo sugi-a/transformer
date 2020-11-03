@@ -74,7 +74,11 @@ def loss_norm(logits, y, ls_eps):
     Returns:
         loss: <[], tf.float32>
     """
-    return loss_additive(logits, y, ls_eps) / count_toks(y)
+    toks = count_toks(y)
+    if toks > 0:
+        return loss_additive(logits, y, ls_eps) / toks
+    else:
+        return tf.constant(0.0)
 
 
 def count_toks(seqs, dtype=tf.float32):
@@ -98,7 +102,11 @@ def count_corr_from_logits(logits, y):
 
 
 def accuracy(logits, y):
-    return count_corr_from_logits(logits, y) / count_toks(y)
+    toks = count_toks(y)
+    if toks > 0:
+        return count_corr_from_logits(logits, y) / toks
+    else:
+        return tf.constant(0.0)
 
 
 def distributed_map_reduce_sum(fn, inputs):
@@ -359,7 +367,10 @@ class Train:
             logits = self.model(x, y_i, training=True)
             loss = loss_norm(logits, y_o, ls_eps=tc['label_smoothing'])
 
-        grad = tape.gradient(loss, self.model.trainable_variables)
+        grad = tape.gradient(
+            loss,
+            self.model.trainable_variables,
+            unconnected_gradients=tf.UnconnectedGradients.ZERO)
 
         metrics = {k: v['calc'](logits, y_o, loss)
             for k, v in self.metrics.items()}
