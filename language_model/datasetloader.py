@@ -65,7 +65,7 @@ def create_simple_batch_generator(
     gen = gen.map(lambda seqs: seqs[0])
 
     if batch_shuf_buf_size is not None:
-        gen = gen.trans(gen_random_sample, batch_shuf_buf_size)
+        gen = gen.trans(dp.gen_random_sample, batch_shuf_buf_size)
     
     return gen
 

@@ -155,7 +155,7 @@ class Train:
                 vocab=self.vocab,
                 stochastic=True,
                 batch_capacity=capacity,
-                shuf_buf_size=bc['shuffle_buf_size'],
+                shuf_buf_size=bc['shuf_buf_size'],
                 length_smoothing=bc['length_smoothing'],
                 batch_shuf_buf_size=bc['batch_shuf_buf_size']) \
             .map(dp.list2numpy_nested) \
