@@ -50,19 +50,19 @@ def gen_doc_from_lines(seq_iterable):
         yield doc
 
 
-def gen_front_aligned_segment_from_docs(doc_iterable, window_size):
+def gen_front_aligned_segment_from_docs(doc_iterable, window_size, stride):
     for doc in doc_iterable:
-        q = deque()
-        k = 0
-        l = len(doc[0])
-        for seq in doc:
-            q.extend(seq)
-            while len(q) >= window_size:
-                yield list(itertools.islice(q, window_size))
-                for _ in range(len(doc[k])):
-                    q.popleft()
-                k += 1
-        yield list(q)
+        for idx in range(0, len(doc), stride):
+            buf = []
+            for i in range(idx, len(doc), stride):
+                buf.extend(doc[i])
+                if len(buf) > window_size:
+                    break
+            if len(buf) < window_size:
+                yield buf
+                break
+            else:
+                yield buf[:window_size]
 
 
 class Train:
@@ -89,28 +89,29 @@ class Train:
 
 
     def calc_loss(self, x, training):
-        if tf.size(x) > 0:
-            x_i, x_o = x[:, :-1], x[:, 1:]
+        x_i, x_o = x[:, :-1], x[:, 1:]
+
+        mask = get_mask(x_o)
+        ntoks = tf.reduce_sum(mask)
+            
+        if ntoks > 0:
             lgts = self.model(x_i, training=training)
         
             losses = sparse_softmax_xent_loss(
                 x_o, lgts, self.train_config['label_smoothing'])
-            mask = get_mask(x_o)
-            loss = tf.reduce_sum(losses * mask) / tf.reduce_sum(mask)
+
+            loss = tf.reduce_sum(losses * mask) / ntoks
         else:
-            loss = 0.0
+            loss = tf.constant(0.0)
         
         return loss
 
 
     def calc_grad(self, x):
-        if tf.size(x) > 0:
-            with tf.GradientTape() as tape:
-                loss = self.calc_loss(x, True)
-            
-            grad = tape.gradient(loss, self.model.trainable_variables)
-        else:
-            grad = [tf.zeros_like(x) for x in self.model.trainable_variables]
+        with tf.GradientTape() as tape:
+            loss = self.calc_loss(x, True)
+        
+        grad = tape.gradient(loss, self.model.trainable_variables)
         
         return grad 
     
@@ -183,7 +184,8 @@ class Train:
             .trans(gen_doc_from_lines)
             .trans(
                 gen_front_aligned_segment_from_docs,
-                bc['sampling']['window_size'])
+                window_size=bc['sampling']['window_size'],
+                stride=bc['sampling']['stride_sentences'])
             .trans(dp.gen_random_sample, bufsize=bc['shuffle_buf_size'])
             .map(lambda seq: (seq,))
             .trans(dp.gen_batch_multi, batch_size)
@@ -210,7 +212,8 @@ class Train:
             .trans(gen_doc_from_lines)
             .trans(
                 gen_front_aligned_segment_from_docs,
-                bc['sampling']['window_size'])
+                window_size=bc['sampling']['window_size'],
+                stride=bc['sampling']['window_size'])
             .map(lambda seq: (seq,))
             .trans(dp.gen_batch_multi, batch_size)
             .trans(dp.gen_pad_batch_multi)

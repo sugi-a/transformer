@@ -8,7 +8,8 @@ type BatchSampling = {
         header: string
     } | {
         mode: 'sentence_sliding_window',
-        window_size: Int
+        window_size: Int,
+        stride_sentences: Int
     }
 
 export type Config = {

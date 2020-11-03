@@ -2,7 +2,8 @@
     "batch": {
         "sampling": {
             "mode": "sentence_sliding_window",
-            "window_size": 512
+            "window_size": 512,
+            "stride_sentences": 2
         },
         "shuffle_buf_size": 100000,
         "batch_size": 64
