@@ -24,7 +24,7 @@ export type Config = {
     max_step: Int,
     max_epoch: Int,
     summary_interval: Int, // in steps
-    early_stop_patience: Int, // in epochs
+    early_stopping_patience: Int, // in epochs
     data: {
         train: string[],
         dev: string

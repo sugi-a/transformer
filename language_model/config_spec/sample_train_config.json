@@ -14,7 +14,7 @@
     "max_step": 1000000,
     "max_epoch": 100,
     "summary_interval": 500,
-    "early_stop_patience": 2,
+    "early_stopping_patience": 2,
     "data": {
         "train": [],
         "dev": ""
