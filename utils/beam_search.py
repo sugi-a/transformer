@@ -84,7 +84,7 @@ def beam_search(
     assert (get_state_fn is None) == (put_controlled_state_fn is None)
     ex_state = None if get_state_fn is None else get_state_fn()
 
-    shape_inv = [(ex_state, shape_invariants), (paths, TShape([None, K, None]))]
+    shape_inv = [(ex_state, shape_invariants), (paths, TShape([None, None, None]))]
 
     while ~tf.math.reduce_all(closed):
         tf.autograph.experimental.set_loop_options(shape_invariants=shape_inv)
