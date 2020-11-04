@@ -15,6 +15,8 @@ from ..utils.beam_search import length_penalty
 from ..custom_text_data_pipeline.core import *
 from ..custom_text_data_pipeline.vocabulary import Vocabulary
 
+TSpec = tf.TensorSpec
+TI32 = tf.int32
 
 def get_len_penalty_fn(alpha):
     return lambda l: length_penalty(l, alpha)
@@ -26,6 +28,37 @@ def create_mask(y, dtype=tf.float32):
 
 def count_toks(y, dtype=tf.float32):
     return tf.reduce_sum(create_mask, dtype)
+
+
+def deco_cache_provider(f):
+    cache = {}
+    def f_(*args):
+        f(*args, cache)
+    
+    return f_
+
+
+def is_tensor_spec(nested):
+    return all(isinstance(a, TSpec) for a in nest.flatten(nested))
+
+
+def get_signed_func_wrapper(f, signature):
+    tspec_idx = [i for i, s in enumerate(signature) if is_tensor_spec(s)]
+    tensor_sig = [sig[idx] for idx in tspec_idx]
+
+    @tf.function(input_signature=tensor_sig)
+    def f_(*tensors):
+        args = sig[:]
+        for tensor, idx in zip(tensors, tensor_idx):
+            args[idx] = tensor
+        return f(*args)
+    
+    def wrapper(*args):
+        assert all(a is s for i,(a,s) in
+            enumerate(zip(args, signature)) if i not in tspec_idx)
+        return f_(*[args[idx] for idx in tensor_idx])
+    
+    return wrapper
 
 
 class InferenceBase:
@@ -69,42 +102,60 @@ class InferenceBase:
         return self.dataset_from_gen(gen, (None,) * len(vocabs))
 
 
-    @tf.function
-    def comp_translate(self, x, pfx, beam_size):
-        if tf.size(x) > 0:
-            # [B, K, L], [B, K]
-            paths, scores = self.model.beam_search_decode_with_prefix(
-                x,
-                prefix_or_sos=self.vocab_trg.SOS_ID if pfx is None else pfx,
-                eos=self.vocab_trg.EOS_ID,
-                beam_size=beam_size)
-        else:
-            B = tf.shape(x)[0]
-            paths = tf.zeros([B, beam_size, 0], tf.int32)
-            scores = tf.zeros([B, beam_size], tf.float32)
+    @deco_cache_provider
+    def comp_translate(self, x, pfx, beam_size, _cache=None):
+        def f(x, pfx, beam_size):
+            if tf.size(x) > 0:
+                # [B, K, L], [B, K]
+                paths, scores = self.model.beam_search_decode_with_prefix(
+                    x,
+                    prefix_or_sos=self.vocab_trg.SOS_ID if pfx is None else pfx,
+                    eos=self.vocab_trg.EOS_ID,
+                    beam_size=beam_size)
+            else:
+                B = tf.shape(x)[0]
+                paths = tf.zeros([B, beam_size, 0], tf.int32)
+                scores = tf.zeros([B, beam_size], tf.float32)
 
-        return paths, scores
+            return paths, scores
+
+        if len(_cache) == 0:
+            M0 = TSpec([], tf.int32)
+            M2 = TSpec([None, None], tf.int32)
+            _cache[True] = get_signed_func_wrapper(f, [M2, None, M0])
+            _cache[False] = get_signed_func_wrapper(f, [M2, M2, M0])
+
+        return _cache[pfx is None](x, pfx, beam_size)
     
 
-    @tf.function
-    def comp_token_logp(self, x, y_in, y_out, offsets=None):
-        # [B, L-1, V]
-        logits = self.model(x, y_in, training=False, offsets=offsets)
-        logp_dist = tf.nn.softmax(logits)
+    @deco_cache_provider
+    def comp_token_logp(self, x, y_in, y_out, offsets=None, _cache=None):
+        def f(x, y_in, y_out, offsets):
+            # [B, L-1, V]
+            logits = self.model(x, y_in, training=False, offsets=offsets)
+            logp_dist = tf.nn.softmax(logits)
 
-        # [B, L-1] <- [B, L-1, 1] <- [B, L-1, V]
-        logp = tf.gather(logp_dist, y_out[:, :, None], batch_dims=2)[:, :, 0]
+            # [B, L-1] <- [B, L-1, V]
+            logp = tf.gather(logp_dist, y_out, batch_dims=2)
 
-        return logp * create_mask(y_out)
+            return logp * create_mask(y_out)
+
+        if len(_cache) == 0:
+            M1 = TSpec([None], tf.int32)
+            M2 = TSpec([None, None], tf.int32)
+            _cache[True] = get_signed_func_wrapper(f, [M2, M2, M2, None])
+            _cache[False] = get_signed_func_wrapper(f, [M2, M2, M2, M1])
+
+        return _cache[offsets is None](x, y_in, y_out, offsets)
 
 
-    @tf.function
+    @tf.function(input_signature=[TSpec([None, None], TI32)]*2)
     def comp_seq_logp(self, x, y):
         tok_logp = self.comp_token_logp(x, y[:, :-1], y[:, 1:])
         return tf.reduce_sum(tok_logp, axis=1)
     
 
-    @tf.function
+    @tf.function(input_signature=[TSpec([None, None], TI32)]*3)
     def comp_seq_logp_conditional(self, x, y, prefix):
         pfx, offsets = transfer_padding_to_left(prefix)
         L_pfx = tf.shape(pfx)[1]
@@ -126,15 +177,15 @@ class InferenceBase:
         if prefix is None:
             dataset = (
                 self.create_dataset_multi((x,), (src_v,))
-                .map(lambda b: self.comp_translate(b[0], None, beam_size))
+                .map(lambda *b: self.comp_translate(b[0], None, beam_size))
             )
         else:
             dataset = (
                 self.create_dataset_multi((x, prefix), (src_v, trg_v))
-                .map(lambda b: self.comp_translate(b[0], b[1], beam_size))
+                .map(lambda *b: self.comp_translate(b[0], b[1], beam_size))
             )
         
-        dataset = dataset.prefech(1).unbatch()
+        dataset = dataset.prefech(1).unbatch().prefech(1)
 
         for hypos, scores in dataset:
             yield trg_v.IDs2text(hypos), scores
@@ -145,7 +196,7 @@ class InferenceBase:
         Returns:
             yield str
         """
-        for hypos, scores in self.sents2hypotheses(
+        for hypos, scores in self.gen_sents2hypotheses(
                 x_iter, beam_size, length_penalty, prefix):
             yield hypos[0]
     
@@ -154,15 +205,14 @@ class InferenceBase:
         dataset = (
             self.create_dataset_multi((x, y), (self.vocab_src, self.vocab_trg))
             .prefech(1)
-            .map(lambda b: self.comp_seq_logp(b[0], b[1]))
+            .map(lambda *b: self.comp_seq_logp(b[0], b[1]))
             .unbatch().prefech(1)
         )
         yield from dataset
 
 
     def sents2ppl(self, x, y):
-        def fn_(batch):
-            x,y = batch
+        def fn_(x, y):
             logp = tf.reduce_sum(self.comp_seq_logp(x, y))
             toks = count_toks(y[:, 1:]) # num of toks to be predicted
             return logp, toks
@@ -181,7 +231,7 @@ class InferenceBase:
         dataset = (
             self.create_dataset_multi((x, y, prefix), (src_v, trg_v, trg_v))
             .prefech(1)
-            .map(lambda b: self.comp_seq_logp_conditional(b[0], b[1], b[2]))
+            .map(lambda *b: self.comp_seq_logp_conditional(b[0], b[1], b[2]))
             .unbatch().prefech()
         )
         yield from dataset
@@ -189,10 +239,6 @@ class InferenceBase:
 
 
 def main():
-    log_levels = {
-        'INFO': INFO,
-        'DEBUG': DEBUG
-    }
     p = argparse.ArgumentParser()
     p.add_argument('--dir', '-d', type=str, default='.')
     p.add_argument('--checkpoint', type=str)
@@ -202,10 +248,11 @@ def main():
     p.add_argument('--prefix', action='store_true')
     p.add_argument('--beam_size', type=int, default=1)
     p.add_argument('--length_penalty', type=float)
-    p.add_argument('--log_level', choices=['INFO', 'DEBUG'], default='INFO')
+    p.add_argument('--debug', action='store_true')
     args = p.parse_args()
 
-    basicConfig(level=log_levels[args.log_level])
+    if args.debug:
+        basicConfig(level=DEBUG)
 
     # Config
     with open(f'{args.dir}/model_config.json') as f:
@@ -232,9 +279,10 @@ def main():
             x, prefix = sys.stdin, None
 
         for line in inference.gen_sents2sents(
-                sys.stdin,
+                x,
                 beam_size=args.beam_size,
-                length_penalty=lp_fn):
+                length_penalty=lp_fn,
+                prefix=prefix):
             print(line)
 
 if __name__ == '__main__':
