@@ -2,21 +2,21 @@ type Int = number;
 type Float = number;
 
 type BatchSampling = {
-        mode: 'random_sliding_window',
-        window_size: Int,
-        keep_remainder_larger_equal: Int,
-        header: string
+        mode: 'normal',
+        length_smoothing: Int | null,
+        batch_shuf_buf_size: Int | null
     } | {
-        mode: 'sentence_sliding_window',
-        window_size: Int,
-        stride_sentences: Int
+        mode: 'front_aligned_segs_from_docs',
+        max_window_size: Int,
+        min_window_size: Int,
+        min_stride: Int
     }
 
 export type Config = {
     batch: {
         sampling: BatchSampling,
-        shuffle_buf_size: Int,
-        batch_size: Int,
+        shuf_buf_size: Int,
+        capacity: Int
     },
     random_seed: Int,
     warm_up_steps: Int,

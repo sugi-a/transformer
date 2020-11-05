@@ -19,22 +19,6 @@ def gen_doc_from_lines(seq_iterable):
         yield doc
 
 
-def gen_front_aligned_segment_from_docs(doc_iterable, window_size, stride):
-    for doc in doc_iterable:
-        for idx in range(0, len(doc), stride):
-            buf = []
-            for i in range(idx, len(doc), stride):
-                buf.extend(doc[i])
-                if len(buf) > window_size:
-                    break
-            if len(buf) < window_size:
-                yield buf
-                break
-            else:
-                yield buf[:window_size]
-
-
-
 def create_simple_batch_generator(
         files,
         vocab,
@@ -70,10 +54,76 @@ def create_simple_batch_generator(
     return gen
 
 
-def create_sos_aligned_multi_sent_batch_generator(
+def gen_front_aligned_segment(
+        seq_iterable, max_win, min_win, min_stride):
+    q_tok = deque()
+    q_len = deque()
+    for seq in seq_iterable:
+        if len(seq) == 0:
+            while len(q_tok) >= min_win:
+                # Yield all
+                yield list(q_tok)
+
+                # Throw the front seqs
+                thrown = 0
+                while q_len and thrown < min_stride:
+                    l = q_len.popleft()
+                    thrown += l
+                    for _ in range(l):
+                        q_tok.popleft()
+                
+            q_tok.clear()
+            q_len.clear()
+        else:
+            q_tok.extend(seq)
+            q_len.append(len(seq))
+            if len(q_tok) < max_win:
+                continue
+            while len(q_tok) >= max_win:
+                # Yield the front win_size toks
+                yield list(itertools.islice(q_tok, max_win))
+
+                # Throw the front seqs
+                thrown = 0
+                while q_len and thrown < min_stride:
+                    l = q_len.popleft()
+                    thrown += l
+                    for _ in range(l):
+                        q_tok.popleft()
+    if q_tok:
+        yield list(q_tok)
+
+
+def create_front_aligned_doc_segment_generator(
         files,
-        vocab):
-    pass
+        vocab,
+        stochastic,
+        max_window_size,
+        min_window_size,
+        min_stride,
+        capacity,
+        shuf_buf_size=None
+        ):
+    gen = dp.ChainableGenerator(lambda: files)
+
+    if stochastic: gen = gen.trans(dp.gen_random_sample)
+
+    gen = gen.trans(dp.gen_line_from_files)
+    gen = gen.trans(dp.gen_line2IDs, vocab)
+    gen = gen.trans(
+        gen_front_aligned_segment,
+        max_win=max_window_size,
+        min_win=min_window_size,
+        min_stride=min_stride)
+    
+    if stochastic:
+        gen = gen.trans(dp.gen_random_sample, shuf_buf_size)
+
+    gen = gen.map(lambda seq: (seq,))
+    gen = gen.trans(dp.gen_batch_of_capacity_multi, capacity)
+    gen = gen.trans(dp.gen_pad_batch_multi)
+    gen = gen.map(lambda seqs: seqs[0])
+    return gen
 
 
 class MultiSentenceSlidingWindowLoader:
