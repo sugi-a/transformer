@@ -160,7 +160,7 @@ def sequential_map_reduce(map_fn, reduce_fn, list_x):
         return map_fn(list_x[0])
 
     map_fn_sig = nest.map_structure(get_spec_shape_inv, list_x[0])
-    map_fn = tf.function(map_fn, map_fn_sig)
+    map_fn = tf.function(map_fn, [map_fn_sig])
 
     i_arrays = list2tensor_array(list_x[1:])
 
