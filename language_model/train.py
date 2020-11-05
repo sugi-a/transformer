@@ -24,7 +24,8 @@ from ..vanilla.train import \
     weighted_avg, \
     learning_rate
 from .datasetloader import \
-    create_simple_batch_generator
+    create_simple_batch_generator, \
+    create_front_aligned_doc_segment_generator
 
 
 TShape = tf.TensorShape
@@ -97,15 +98,19 @@ class Train:
     @deco_function_oneshot_shape_inv
     def train_step(self, inputs):
         count_fn = lambda b: count_toks(b[:, 1:], tf.float32)
-        fn = lambda b: (self.calc_grad(b), count_fn(b))
-        o_specs = get_output_specs_shape_inv(fn, inputs[0][0])
+        map_fn = lambda b: (self.calc_grad(b), count_fn(b))
+
+        def reduce_fn(*g_ntoks):
+            gs, ntoks = zip(*g_ntoks)
+            g, ntok = weighted_avg(gs, ntoks)
+            return (g, ntok)
 
         def accum_fn(batches):
-            g, ntoks = zip(*mg.sequential_map(fn, batches, o_specs))
-            return weighted_avg(g, ntoks)
+            g, ntok = mg.sequential_map_reduce(map_fn, reduce_fn, batches)
+            return g, ntok
 
-        g, ntoks = zip(*mg.distr_map(accum_fn, inputs))
-        g, _ = weighted_avg(g, ntoks)
+        gs, ntoks = zip(*mg.distr_map(accum_fn, inputs))
+        g, _ = weighted_avg(gs, ntoks)
         
         self.optimizer.apply_gradients(zip(g, self.model.trainable_variables))
         
@@ -113,17 +118,18 @@ class Train:
     @deco_function_oneshot_shape_inv
     def dev_step(self, inputs):
         count_fn = lambda b: count_toks(b[:, 1:], tf.float32)
-        fn = lambda b: (self.calc_loss(b, False), count_fn(b))
-        o_specs = get_output_specs_shape_inv(fn, inputs[0][0])
+        map_fn = lambda b: (self.calc_loss(b, False), count_fn(b))
+
+        def reduce_fn(*o_ntoks):
+            return weighted_avg(*zip(*o_ntoks))
 
         def accum_fn(batches):
-            o, ntoks = zip(*mg.sequential_map(fn, batches, o_specs))
-            return weighted_avg(o, ntoks)
+            return mg.sequential_map_reduce(map_fn, reduce_fn, batches)
 
-        o, ntoks = zip(*mg.distr_map(accum_fn, inputs))
-        o, w = weighted_avg(o, ntoks)
+        os, ntoks = zip(*mg.distr_map(accum_fn, inputs))
+        o, ntok = weighted_avg(os, ntoks)
 
-        self.dev_loss.update_state(o, w)
+        self.dev_loss.update_state(o, ntok)
 
 
     def update_dev_metrics(self, dev_dataset):
@@ -144,20 +150,34 @@ class Train:
     def create_train_data_gen(self):
         bc = self.train_config['batch']
         dc = self.train_config['data']
+        sc = bc['sampling']
 
         w, h = self.accums, self.gpus
         n = w * h
-
         capacity = bc['capacity'] // n
 
-        return create_simple_batch_generator(
+        if sc['mode'] == 'normal':
+            return create_simple_batch_generator(
                 files=dc['train'],
                 vocab=self.vocab,
                 stochastic=True,
                 batch_capacity=capacity,
                 shuf_buf_size=bc['shuf_buf_size'],
-                length_smoothing=bc['length_smoothing'],
-                batch_shuf_buf_size=bc['batch_shuf_buf_size']) \
+                length_smoothing=sc['length_smoothing'],
+                batch_shuf_buf_size=sc['batch_shuf_buf_size']) \
+            .map(dp.list2numpy_nested) \
+            .trans(dp.gen_fold, n, np.zeros([0, 0])) \
+            .map(lambda b: tuple(b[i: i+w] for i in range(0, n, w)))
+        elif sc['mode'] == 'front_aligned_segs_from_docs':
+            return create_front_aligned_doc_segment_generator(
+                files=dc['train'],
+                vocab=self.vocab,
+                stochastic=True,
+                max_window_size=sc['max_window_size'],
+                min_window_size=sc['min_window_size'],
+                min_stride=sc['min_stride'],
+                capacity=capacity,
+                shuf_buf_size=bc['shuf_buf_size']) \
             .map(dp.list2numpy_nested) \
             .trans(dp.gen_fold, n, np.zeros([0, 0])) \
             .map(lambda b: tuple(b[i: i+w] for i in range(0, n, w)))
@@ -166,21 +186,37 @@ class Train:
     def create_dev_data_gen(self):
         bc = self.train_config['batch']
         dc = self.train_config['data']
+        sc = bc['sampling']
 
         w, h = self.accums, self.gpus
         n = w * h
 
         capacity = bc['capacity'] // n
 
-        return create_simple_batch_generator(
+        if sc['mode'] == 'normal':
+            return create_simple_batch_generator(
                 files=[dc['dev']],
                 vocab=self.vocab,
                 stochastic=False,
                 batch_capacity=capacity,
-                length_smoothing=bc['length_smoothing']) \
+                length_smoothing=sc['length_smoothing']) \
             .map(dp.list2numpy_nested) \
             .trans(dp.gen_fold, n, np.zeros([0, 0])) \
             .map(lambda b: tuple(b[i: i+w] for i in range(0, n, w)))
+        elif sc['mode'] == 'front_aligned_segs_from_docs':
+            return create_front_aligned_doc_segment_generator(
+                files=[dc['dev']],
+                vocab=self.vocab,
+                stochastic=False,
+                max_window_size=sc['max_window_size'],
+                min_window_size=sc['min_window_size'],
+                min_stride=sc['min_stride'],
+                capacity=capacity) \
+            .map(dp.list2numpy_nested) \
+            .trans(dp.gen_fold, n, np.zeros([0, 0])) \
+            .map(lambda b: tuple(b[i: i+w] for i in range(0, n, w)))
+        else:
+            raise
 
 
     def dataset_from_gen(self, gen):
@@ -415,8 +451,6 @@ def main(argv):
     parser.add_argument('--mode', type=str,
         choices=['train', 'check_data', 'debug'], default='train')
     parser.add_argument('--debug', action='store_true')
-    parser.add_argument('--debug_base_class', action='store_true')
-    parser.add_argument('--debug_post_split', action='store_true')
     parser.add_argument('--debug_eager_function', action='store_true')
     
     args = parser.parse_args(argv)

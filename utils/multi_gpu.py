@@ -123,6 +123,10 @@ def get_shape_inv(t):
     return tf.TensorShape([None] * rank)
 
 
+def get_spec_shape_inv(t):
+    return tf.TensorSpec(get_shape_inv(t), t.dtype)
+
+
 def list2tensor_array(lst):
     """
     Args:
@@ -146,6 +150,27 @@ def list2tensor_array(lst):
             lambda a, v: a.write(i, v), arrays, x)
     
     return arrays
+
+
+def sequential_map_reduce(map_fn, reduce_fn, list_x):
+    N = len(list_x)
+    assert N > 0
+
+    if N == 1:
+        return map_fn(list_x[0])
+
+    map_fn_sig = nest.map_structure(get_spec_shape_inv, list_x[0])
+    map_fn = tf.function(map_fn, map_fn_sig)
+
+    i_arrays = list2tensor_array(list_x[1:])
+
+    outs = map_fn(list_x[0])
+
+    for i in tf.range(N - 1):
+        tf.autograph.experimental.set_loop_options(parallel_iterations=1)
+        outs = reduce_fn(outs, map_fn(i_arrays.read(i)))
+
+    return outs
 
 
 def sequential_map(fn, list_x, out_spec):
