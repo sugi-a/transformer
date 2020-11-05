@@ -108,17 +108,22 @@ class InferenceBase:
 
 
     @deco_cache_provider
-    def comp_translate(self, x, pfx, beam_size, _cache=None):
-        def f(x, pfx, beam_size):
+    def comp_translate(self, x, pfx, beam_size, maxlen_ratio, _cache=None):
+        def f(x, pfx, beam_size, maxlen_ratio):
             prefix_or_sos = self.vocab_trg.SOS_ID if pfx is None else pfx
             with tf.device('/gpu:0'):
                 if tf.size(x) > 0:
+                    src_lens = tf.reduce_sum(create_mask(x), axis=1)
+                    maxlen = tf.cast(maxlen_ratio * src_lens + 10.0, tf.int32)
+                    maxlen = tf.where(src_lens == 0.0, 0, maxlen)
                     # [B, K, L], [B, K]
+
                     paths, scores = self.model.beam_search_decode_with_prefix(
                         x,
                         prefix_or_sos=prefix_or_sos,
                         eos=self.vocab_trg.EOS_ID,
-                        beam_size=beam_size)
+                        beam_size=beam_size,
+                        maxlen=maxlen)
                 else:
                     B = tf.shape(x)[0]
                     paths = tf.zeros([B, beam_size, 0], tf.int32)
@@ -127,12 +132,13 @@ class InferenceBase:
                 return paths, scores
 
         if len(_cache) == 0:
+            MF0 = TSpec([], tf.float32)
             M0 = TSpec([], tf.int32)
             M2 = TSpec([None, None], tf.int32)
-            _cache[True] = get_signed_func_wrapper(f, [M2, None, M0])
-            _cache[False] = get_signed_func_wrapper(f, [M2, M2, M0])
+            _cache[True] = get_signed_func_wrapper(f, [M2, None, M0, MF0])
+            _cache[False] = get_signed_func_wrapper(f, [M2, M2, M0, MF0])
 
-        return _cache[pfx is None](x, pfx, beam_size)
+        return _cache[pfx is None](x, pfx, beam_size, maxlen_ratio)
     
 
     @deco_cache_provider
@@ -177,7 +183,7 @@ class InferenceBase:
     
 
     def gen_sents2hypotheses(
-            self, x, beam_size, length_penalty=None, prefix=None):
+            self, x, beam_size, length_penalty=None, prefix=None, maxlen_ratio=1.5):
         """
         Returns:
             yield hypos_and_scores: (str[], float[])
@@ -185,11 +191,11 @@ class InferenceBase:
         src_v, trg_v = self.vocab_src, self.vocab_trg
 
         if prefix is None:
-            trans_fn = lambda *b: self.comp_translate(b[0], None, beam_size)
+            trans_fn = lambda *b: self.comp_translate(b[0], None, beam_size, maxlen_ratio)
             dataset = self.create_dataset_multi((x,), (src_v,))
             dataset = dataset.map(trans_fn)
         else:
-            trans_fn = lambda *b: self.comp_translate(b[0], b[1], beam_size)
+            trans_fn = lambda *b: self.comp_translate(b[0], b[1], beam_size, maxlen_ratio)
             dataset = self.create_dataset_multi((x, prefix), (src_v, trg_v))
             dataset = dataset.map(trans_fn)
         
@@ -285,7 +291,13 @@ def main(argv):
     # Transformer Model
     model = Transformer.from_config(model_config)
     ckpt = tf.train.Checkpoint(model=model)
-    ckpt.restore(args.checkpoint)
+    if args.checkpoint is None:
+        ckpt_path = tf.train.latest_checkpoint(f'{args.dir}/checkpoint_best')
+    else:
+        ckpt_path = args.checkpoint
+    assert ckpt_path is not None
+    ckpt.restore(ckpt_path)
+    logger.info(f'Checkpoint: {ckpt_path}')
 
     # Inference Class
     inference = InferenceBase(model, vocab_config, args.capacity)
