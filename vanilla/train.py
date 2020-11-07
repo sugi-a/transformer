@@ -979,6 +979,8 @@ def main(argv):
             trainer.create_train_data_gen()).prefetch(1)
         dev_dataset = trainer.dataset_from_gen(
             trainer.create_dev_data_gen()).prefetch(1)
+
+        set_random_seed(0)
         print('Train Dataset')
         trainer.check_dataset(train_dataset)
         print('Dev Dataset')
