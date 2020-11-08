@@ -4,7 +4,8 @@
             "mode": "front_aligned_segs_from_docs",
             "max_window_size": 512,
             "min_window_size": 64,
-            "min_stride": 20
+            "min_stride": 10,
+            "rand_extra_stride": 80
         },
         "shuf_buf_size": 100000,
         "capacity": 32768

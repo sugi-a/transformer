@@ -176,6 +176,7 @@ class Train:
                 max_window_size=sc['max_window_size'],
                 min_window_size=sc['min_window_size'],
                 min_stride=sc['min_stride'],
+                rand_extra_stride=sc['rand_extra_stride'],
                 capacity=capacity,
                 shuf_buf_size=bc['shuf_buf_size']) \
             .map(dp.list2numpy_nested) \
@@ -210,7 +211,8 @@ class Train:
                 stochastic=False,
                 max_window_size=sc['max_window_size'],
                 min_window_size=sc['min_window_size'],
-                min_stride=sc['min_stride'],
+                min_stride=sc['min_stride'] + sc['rand_extra_stride'] // 2,
+                rand_extra_stride=0,
                 capacity=capacity) \
             .map(dp.list2numpy_nested) \
             .trans(dp.gen_fold, n, np.zeros([0, 0])) \

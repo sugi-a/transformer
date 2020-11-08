@@ -2,6 +2,7 @@ import sys, json, random
 from logging import getLogger; logger = getLogger(__name__)
 from collections import deque
 import itertools
+import random
 
 from ..custom_text_data_pipeline import core as dp
 
@@ -55,7 +56,8 @@ def create_simple_batch_generator(
 
 
 def gen_front_aligned_segment(
-        seq_iterable, max_win, min_win, min_stride):
+        seq_iterable, max_win, min_win, min_stride, rand_extra_stride=0):
+    assert min_stride > 0
     q_tok = deque()
     q_len = deque()
     for seq in seq_iterable:
@@ -66,7 +68,8 @@ def gen_front_aligned_segment(
 
                 # Throw the front seqs
                 thrown = 0
-                while q_len and thrown < min_stride:
+                m_stride_ = min_stride + random.randrange(rand_extra_stride + 1)
+                while q_len and thrown < m_stride_:
                     l = q_len.popleft()
                     thrown += l
                     for _ in range(l):
@@ -85,11 +88,13 @@ def gen_front_aligned_segment(
 
                 # Throw the front seqs
                 thrown = 0
-                while q_len and thrown < min_stride:
+                m_stride_ = min_stride + random.randrange(rand_extra_stride + 1)
+                while q_len and thrown < m_stride_:
                     l = q_len.popleft()
                     thrown += l
                     for _ in range(l):
                         q_tok.popleft()
+
     if q_tok:
         yield list(q_tok)
 
@@ -101,6 +106,7 @@ def create_front_aligned_doc_segment_generator(
         max_window_size,
         min_window_size,
         min_stride,
+        rand_extra_stride,
         capacity,
         shuf_buf_size=None
         ):
@@ -110,11 +116,13 @@ def create_front_aligned_doc_segment_generator(
 
     gen = gen.trans(dp.gen_line_from_files)
     gen = gen.trans(dp.gen_line2IDs, vocab)
+
     gen = gen.trans(
         gen_front_aligned_segment,
         max_win=max_window_size,
         min_win=min_window_size,
-        min_stride=min_stride)
+        min_stride=min_stride,
+        rand_extra_stride=rand_extra_stride)
     
     if stochastic:
         gen = gen.trans(dp.gen_random_sample, shuf_buf_size)

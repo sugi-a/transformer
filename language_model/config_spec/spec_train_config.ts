@@ -9,7 +9,8 @@ type BatchSampling = {
         mode: 'front_aligned_segs_from_docs',
         max_window_size: Int,
         min_window_size: Int,
-        min_stride: Int
+        min_stride: Int,
+        rand_extra_stride: Int
     }
 
 export type Config = {
