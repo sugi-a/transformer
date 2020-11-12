@@ -43,6 +43,11 @@ def gen_line2IDs_multi(lines_iter, vocabs):
                 for vocab, line in zip(vocabs, lines))
 
 
+def gen_skip_empty_line_multi_all(lines_iterable):
+    filter_fn = lambda lines: any(l.strip() != '' for l in lines)
+    return filter(filter_fn, lines_iterable)
+
+
 def list2numpy_nested(nested):
     """Converts lists in the nested structure into numpy arrays
     Args:
