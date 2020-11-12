@@ -279,10 +279,13 @@ class Train:
             source_vocab,
             target_vocab,
             train_config,
-            logdir):
+            logdir,
+            reset_best_score=False):
         self.logdir = logdir
 
         self.model = model
+
+        self.reset_best_score = reset_best_score
 
         self.train_config = train_config
 
@@ -624,6 +627,10 @@ class Train:
         else:
             logger.info('Checkpoint was not found')
 
+        if self.reset_best_score:
+            logger.warn('\n\nReset best score\n')
+            best_score.assign(-1e10)
+
         start_epoch = epoch.numpy()
         start_loc_step = loc_step.numpy()
         
@@ -806,6 +813,7 @@ class TrainMultiGPULegacy(Train):
             pass
         else:
             raise Exception('Invalid parameter')
+
     
 
     def dataset_from_gen(self, gen):
@@ -869,8 +877,7 @@ class TrainMultiGPULegacy(Train):
         return tf.math.add_n([count_toks(y[:, 1:]) for y in ys])
     
 
-    @deco_function_oneshot_shape_inv
-    def translate_step(self, inputs):
+    def translate_step_(self, inputs):
         """
         Args:
             xs: <[B, L]>[N_gpu * N_accum]
@@ -888,6 +895,17 @@ class TrainMultiGPULegacy(Train):
         return ys, pred
 
 
+    def translate_step(self, inputs):
+        self.translate_step = tf.function(
+            self.translate_step_,
+            input_signature=[
+                (((TSpec([None, None], tf.int32),)*2,)*self.accums,)*self.gpus
+            ])
+        
+        self.translate_step(inputs)
+
+
+
 def main(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument('--dir', '-d', type=str, default='.')
@@ -899,6 +917,7 @@ def main(argv):
     parser.add_argument('--debug_base_class', action='store_true')
     parser.add_argument('--debug_post_split', action='store_true')
     parser.add_argument('--debug_eager_function', action='store_true')
+    parser.add_argument('--reset_best_score', action='store_true')
     
     args = parser.parse_args(argv)
 
@@ -933,7 +952,8 @@ def main(argv):
                 source_vocab=vocab_src,
                 target_vocab=vocab_trg,
                 train_config=train_config,
-                logdir=logdir)
+                logdir=logdir,
+                reset_best_score=args.reset_best_score)
         else:
             trainer = TrainMultiGPULegacy(
                 model,
@@ -944,7 +964,8 @@ def main(argv):
                 gpus=args.n_gpus,
                 accums=args.accums,
                 split_type='divide_batch' \
-                    if args.debug_post_split else 'small_minibatch')
+                    if args.debug_post_split else 'small_minibatch',
+                reset_best_score=args.reset_best_score)
         
         trainer.train()
     elif args.mode == 'check_data':
@@ -979,8 +1000,6 @@ def main(argv):
             trainer.create_train_data_gen()).prefetch(1)
         dev_dataset = trainer.dataset_from_gen(
             trainer.create_dev_data_gen()).prefetch(1)
-
-        set_random_seed(0)
         print('Train Dataset')
         trainer.check_dataset(train_dataset)
         print('Dev Dataset')
