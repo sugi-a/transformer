@@ -721,7 +721,7 @@ class Train:
                 break
     
 
-    def check_dataset(self, dataset):
+    def check_dataset(self, dataset, xy_generator=None):
         @tf.function(input_signature=[dataset.element_spec])
         def toks_(batch):
             return tf.math.add_n([count_toks(x) for x in nest.flatten(batch)])
@@ -743,8 +743,11 @@ class Train:
         def lens(batch):
             len_fn = lambda x: tf.reduce_sum(get_mask(x), axis=1)
             lens = nest.map_structure(len_fn, batch)
-            lens = nest.flatten(lens)
-            xs, ys = zip(*[lens[i: i + 2] for i in range(0, len(lens), 2)])
+            if xy_generator is not None:
+                xs, ys = zip(*xy_generator(lens))
+            else:
+                lens = nest.flatten(lens)
+                xs, ys = zip(*[lens[i: i + 2] for i in range(0, len(lens), 2)])
             x = tf.concat(xs, axis=0)
             y = tf.concat(ys, axis=0)
 

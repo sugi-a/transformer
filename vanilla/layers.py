@@ -760,7 +760,8 @@ class Transformer(keras.layers.Layer):
             prefix, offsets = None, None
             sos = tf.broadcast_to(prefix_or_sos, [B])
 
-        maxlen = self.maxlen if maxlen is None else tf.math.minimum(self.maxlen, maxlen)
+        maxlen = self.maxlen if maxlen is None \
+            else tf.math.minimum(self.maxlen, maxlen)
 
         # [B * K, L, E]
         rep_enc_out = tf.repeat(enc_out, K, axis=0)
