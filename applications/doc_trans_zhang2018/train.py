@@ -36,6 +36,12 @@ class Train(vt.Train):
         
         self.accums = 1 if accums is None else accums
 
+        # Debug
+        N2 = tf.TensorSpec([None, None], tf.int32)
+        self.model_call_wrapper = tf.function(
+            lambda c,x,y,training: self.model(c, x, y, training=training),
+            input_signature=[N2, N2, N2, tf.TensorSpec([], tf.bool)])
+
 
     def get_batch_weight_core(self, batch):
         c, x, y = batch
@@ -52,7 +58,8 @@ class Train(vt.Train):
         y_i, y_o = y[:, :-1], y[:, 1:]
         ls_eps = self.train_config['label_smoothing']
         with tf.GradientTape() as tape:
-            logits = self.model(c, x, y_i, training=True)
+            #logits = self.model(c, x, y_i, training=True)
+            logits = self.model_call_wrapper(c, x, y_i, True)
             loss = vt.loss_norm(logits, y_o, ls_eps=ls_eps)
 
         grad = tape.gradient(
@@ -87,7 +94,8 @@ class Train(vt.Train):
         c, x, y = batch
         if tf.size(x) > 0:
             y_i, y_o = y[:, :-1], y[:, 1:]
-            logits = self.model(c, x, y_i, training=False)
+            #logits = self.model(c, x, y_i, training=False)
+            logits = self.model_call_wrapper(c, x, y_i, False)
             loss = vt.loss_norm(
                 logits, y_o, ls_eps=self.train_config['label_smoothing'])
             metrics = {k: v['calc'](logits, y_o, loss)
@@ -137,7 +145,8 @@ class Train(vt.Train):
                 key=lambda seqs: len(seqs[1]))
             .trans(
                 dp.gen_batch_of_capacity_multi,
-                bc['size'])
+                bc['size'] // (self.gpus * self.accums),
+                capacity_fn=lambda ws, h: sum(max(w**2/200, w) for w in ws)*h)
             .trans(dp.gen_pad_batch_multi)
             .trans(
                 dp.gen_random_sample,
@@ -159,7 +168,8 @@ class Train(vt.Train):
                 (self.vocab_src, self.vocab_src, self.vocab_trg))
             .trans(
                 dp.gen_batch_of_capacity_multi,
-                bc['size'])
+                bc['size'] // (self.gpus * self.accums),
+                capacity_fn=lambda ws, h: sum(max(w**2/200, w) for w in ws)*h)
             .trans(dp.gen_pad_batch_multi)
         )
     
@@ -296,7 +306,6 @@ def main(argv):
             gpus=args.n_gpus,
             accums=args.accums)
         
-        print(len(list(trainer.create_train_data_gen()())))
         train_dataset = trainer.dataset_from_gen(
             trainer.create_train_data_gen()).prefetch(1)
         dev_dataset = trainer.dataset_from_gen(
