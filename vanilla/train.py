@@ -910,7 +910,7 @@ class TrainMultiGPULegacy(Train):
                 (((TSpec([None, None], tf.int32),)*2,)*self.accums,)*self.gpus
             ])
         
-        self.translate_step(inputs)
+        return self.translate_step(inputs)
 
 
 
