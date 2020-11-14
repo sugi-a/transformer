@@ -472,6 +472,11 @@ class Train:
             for pred_ in nest.flatten(pred):
                 hyps.extend(self.vocab_trg.IDs2text(pred_.numpy()))
         
+        samples = '\n'.join(
+            map(lambda r_o: f'[Ref] {r_o[0]}\n[Out] {r_o[1]}',
+                itertools.islice(zip(refs, hyps), 5)))
+        logger.debug('First 5 lines of reference and translation\n' + samples)
+
         refs = [[line.split()] for line in refs]
         hyps = [line.split() for line in hyps]
 
