@@ -57,17 +57,21 @@ class DecoderLanguageModel(keras.layers.Layer):
             name='decoder')
 
 
-    def call(self, x, training, offsets=None):
+    def call(self, x, training, offsets=None, cache=None):
         return self.decoder(
             x,
             self_attn_bias='causal_bias',
             training=training,
-            cache=None,
+            cache=cache,
             offsets=offsets)
     
 
     def create_cache(batch_size):
         return self.decoder.create_cache(batch_size)
+    
+
+    def permute_cache(self, cache, permutation):
+        self.decoder.permute_cache(cache, permutation)
 
 
     @classmethod
