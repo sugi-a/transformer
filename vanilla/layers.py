@@ -733,6 +733,37 @@ class Transformer(keras.layers.Layer):
             ret_embedding=ret_embedding)
         
         return dec_out
+    
+
+    def encode(self, x, training):
+        enc_pad_bias = seq_to_padding_bias(x)
+        enc_out = self.encoder(
+            x, self_attn_bias=enc_pad_bias, training=training)
+        return enc_out, enc_pad_bias
+    
+
+    def create_cache(self, batch_size):
+        """cache and the corresponding shape invariant (both nested)"""
+        return self.decoder.create_cache(batch_size)
+    
+
+    def create_decoder(
+            self, enc_out, enc_pad_bias, init_cache=None, offsets=None):
+        def f(dec_input):
+            return self.decoder(
+                self_attn_bias='causal_bias',
+                training=False,
+                context=enc_out,
+                ctx_attn_bias=enc_pad_bias,
+                cache=init_cache,
+                offsets=offsets,
+                ret_embedding=False)
+        
+        return f
+
+
+    def permute_cache(self, cache, permutation):
+        self.decoder.permute_cache(cache, permutation)
 
 
     def beam_search_decode_with_prefix(
