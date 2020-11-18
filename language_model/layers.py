@@ -66,7 +66,7 @@ class DecoderLanguageModel(keras.layers.Layer):
             offsets=offsets)
     
 
-    def create_cache(batch_size):
+    def create_cache(self, batch_size):
         return self.decoder.create_cache(batch_size)
     
 
