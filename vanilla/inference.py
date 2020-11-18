@@ -137,7 +137,7 @@ class InferenceBase:
             with tf.device('/gpu:0'):
                 # [B, L-1, V]
                 logits = self.model(x, y_in, training=False, offsets=offsets)
-                logp_dist = tf.nn.softmax(logits)
+                logp_dist = tf.nn.log_softmax(logits)
 
                 # [B, L-1] <- [B, L-1, V]
                 logp = tf.gather(logp_dist, y_out, batch_dims=2)
