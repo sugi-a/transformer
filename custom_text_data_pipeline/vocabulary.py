@@ -23,6 +23,10 @@ class Vocabulary:
         return [self.tok2ID.get(tok, self.UNK_ID) for tok in tokens]
 
     
+    def tokens2IDs1D(self, tokens):
+        return [self.tok2ID.get(tok, self.UNK_ID) for tok in tokens]
+
+    
     def IDs2tokens1D(self, IDs, skip_control_symbols=True):
         if skip_control_symbols:
             return [self.ID2tok[id] for id in IDs if not id in self.ctrls]
