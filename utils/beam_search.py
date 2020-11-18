@@ -68,10 +68,12 @@ def beam_search(
     if length_penalty_fn is None:
         length_penalty_fn = lambda x: 1
 
+    ln_one_of_K = tf.concat([[0.0], tf.fill([K - 1], -INF)], axis=0)
+
     # [B, K, 1] <- [B]
     paths = BCT(sos[:, None, None], [B, K, 1])
     # [B, K] Sequence log probability
-    slogp = tf.concat([tf.fill([B, 1], 0.0), tf.fill([B, K - 1], -INF)], axis=1)
+    slogp = BCT(ln_one_of_K[None], [B, K])
     # [B, K] Sequence score (=slogp if no length penalty is used)
     score = tf.identity(slogp)
     # [B, K]
@@ -93,6 +95,7 @@ def beam_search(
 
         # [B * K, V]
         t_logp = get_logits_fn(tf.reshape(paths, [B * K, -1])[:, -1:])[:, 0]
+        V = tf.shape(t_logp)[1]
         # [B, K, V]
         t_logp = tf.reshape(t_logp, [B, K, -1])
 
@@ -104,7 +107,8 @@ def beam_search(
         ], axis=-1)
         t_logp = tf.where(i + 1 >= maxlen[:, None, None], non_eos_bias, t_logp)
         # Set logp=0 for already closed paths
-        t_logp = tf.where(closed[:, :, None], 0.0, t_logp)
+        ln_one_of_V = tf.concat([[0.0], tf.fill([V - 1], -INF)], axis=0)
+        t_logp = tf.where(closed[:, :, None], ln_one_of_V[None, None], t_logp)
 
         # new sequence logp and score
         t_slogp = slogp[:, :, None] + t_logp
