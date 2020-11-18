@@ -111,7 +111,7 @@ def transfer_padding_to_left(seq, pad=0):
     Returns:
         (new_seq: <[B, L], int32>, offsets: <[B], int32>)
     """
-    L = tf.shape(seq)
+    L = tf.shape(seq)[1]
     offsets = tf.reduce_sum(tf.cast(seq == pad, tf.int32), axis=1)
     indices = tf.math.maximum(-1, tf.range(L) - offsets[:, None]) % L
     new_seq = tf.gather(seq, indices, batch_dims=1)
