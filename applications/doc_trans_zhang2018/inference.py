@@ -18,6 +18,9 @@ from ...utils.beam_search import length_penalty
 
 TSpec = tf.TensorSpec
 TI32 = tf.int32
+SI2 = tf.TensorSpec([None, None], tf.int32)
+SI0 = tf.TensorSpec([], tf.int32)
+SF0 = tf.TensorSpec([], tf.float32)
 
 def get_len_penalty_fn(alpha):
     return lambda l: length_penalty(l, alpha)
@@ -62,28 +65,23 @@ def get_signed_func_wrapper(f, signature):
     return wrapper
 
 
+def split_c_x(line):
+    c, x = line.split('\t')
+    return c, x
+
+
 class InferenceBase:
     def __init__(
             self,
             transformer_model,
-            vocab_config,
+            vocab_source,
+            vocab_target,
             batch_capacity):
         
         self.model = transformer_model
 
-        vc = vocab_config
-        self.vocab_src = Vocabulary(
-            vc['source_dict'],
-            PAD_ID=vc['PAD_ID'],
-            SOS_ID=vc['SOS_ID'],
-            EOS_ID=vc['EOS_ID'],
-            UNK_ID=vc['UNK_ID'])
-        self.vocab_trg = Vocabulary(
-            vc['target_dict'],
-            PAD_ID=vc['PAD_ID'],
-            SOS_ID=vc['SOS_ID'],
-            EOS_ID=vc['EOS_ID'],
-            UNK_ID=vc['UNK_ID'])
+        self.vocab_src = vocab_source
+        self.vocab_trg = vocab_target
         
         self.batch_capacity = batch_capacity
         
@@ -108,6 +106,7 @@ class InferenceBase:
         return self.dataset_from_gen(gen, (None,) * len(vocabs))
 
 
+    @tf.function(input_signature=[SI2, SI2, SI0, SF0])
     def comp_translate(self, c, x, beam_size, maxlen_ratio):
         with tf.device('/gpu:0'):
             if tf.size(x) > 0:
@@ -158,16 +157,22 @@ class InferenceBase:
         """
         src_v, trg_v = self.vocab_src, self.vocab_trg
 
-        c_x = map(lambda l: l.split('\t'), src)
+        c_x = map(split_c_x, src)
 
         dataset = self.create_dataset_multi(c_x, (src_v, src_v,)).prefetch(1)
-        trans_fn = lambda *b: self.comp_translate(b[0], b[1], beam_size, maxlen_ratio)
-        dataset = dataset.map(trans_fn)
-        
-        dataset = dataset.prefetch(1).unbatch().prefetch(1)
 
-        for hypos, scores in dataset:
-            yield trg_v.IDs2text(hypos.numpy()), scores.numpy()
+        for c, x in dataset:
+            hypos, scores = self.comp_translate(c, x, beam_size, maxlen_ratio)
+            for h, s in zip(hypos.numpy(), scores.numpy()):
+                yield trg_v.IDs2text(h), s
+
+        #trans_fn = lambda *b: self.comp_translate(b[0], b[1], beam_size, maxlen_ratio)
+        #dataset = dataset.map(trans_fn)
+        #
+        #dataset = dataset.prefetch(1).unbatch().prefetch(1)
+
+        #for hypos, scores in dataset:
+        #    yield trg_v.IDs2text(hypos.numpy()), scores.numpy()
 
 
     def gen_sents2sents(self, x, beam_size=1, length_penalty=None):
@@ -181,7 +186,7 @@ class InferenceBase:
     
 
     def gen_sents2logps(self, src, y):
-        c_x = map(lambda l: l.split('\t'), src)
+        c_x = map(split_c_x, src)
         c_x_y = (c_x_ + (y_,) for c_x_, y_ in zip(c_x, y))
 
         dataset = (
@@ -199,7 +204,7 @@ class InferenceBase:
             toks = count_toks(y[:, 1:]) # num of toks to be predicted
             return logp, toks
 
-        c_x = map(lambda l: l.split('\t'), src)
+        c_x = map(split_c_x, src)
         c_x_y = (c_x_ + (y_,) for c_x_, y_ in zip(c_x, y))
         dataset = (
             self.create_dataset_multi(c_x_y, (self.vocab_src, self.vocab_src, self.vocab_trg))
@@ -219,7 +224,7 @@ class InferenceBase:
                     print(i, (time.time() - t)/i)
 
 
-def main(argv):
+def main(argv, in_fp):
     p = argparse.ArgumentParser()
     p.add_argument('--dir', '-d', type=str, default='.')
     p.add_argument('--checkpoint', '--ckpt', type=str)
@@ -244,7 +249,21 @@ def main(argv):
         model_config = json.load(f)
     
     with open(f'{args.dir}/vocab_config.json') as f:
-        vocab_config = json.load(f)
+        vc = json.load(f)
+
+    vocab_src = Vocabulary(
+        args.dir + '/' + vc['source_dict'],
+        PAD_ID=vc['PAD_ID'],
+        SOS_ID=vc['SOS_ID'],
+        EOS_ID=vc['EOS_ID'],
+        UNK_ID=vc['UNK_ID'])
+    vocab_trg = Vocabulary(
+        args.dir + '/' + vc['target_dict'],
+        PAD_ID=vc['PAD_ID'],
+        SOS_ID=vc['SOS_ID'],
+        EOS_ID=vc['EOS_ID'],
+        UNK_ID=vc['UNK_ID'])
+        
     
     # Model
     model = DocTransformer.from_config(model_config)
@@ -258,7 +277,7 @@ def main(argv):
     logger.info(f'Checkpoint: {ckpt_path}')
 
     # Inference Class
-    inference = InferenceBase(model, vocab_config, args.capacity)
+    inference = InferenceBase(model, vocab_src, vocab_trg, args.capacity)
 
     if args.mode == 'translate':
         if args.length_penalty is None:
@@ -269,7 +288,7 @@ def main(argv):
 
         t = None
         for i,line in enumerate(inference.gen_sents2sents(
-                sys.stdin,
+                list(in_fp),
                 beam_size=args.beam_size,
                 length_penalty=lp_fn)):
             print(line)
@@ -280,4 +299,4 @@ def main(argv):
         inference.unit_test()
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    main(sys.argv[1:], sys.stdin)
