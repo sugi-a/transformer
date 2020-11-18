@@ -751,6 +751,7 @@ class Transformer(keras.layers.Layer):
             self, enc_out, enc_pad_bias, init_cache=None, offsets=None):
         def f(dec_input):
             return self.decoder(
+                dec_input,
                 self_attn_bias='causal_bias',
                 training=False,
                 context=enc_out,

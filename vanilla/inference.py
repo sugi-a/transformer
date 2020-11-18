@@ -65,24 +65,14 @@ class InferenceBase:
     def __init__(
             self,
             transformer_model,
-            vocab_config,
+            vocab_source,
+            vocab_target,
             batch_capacity):
         
         self.model = transformer_model
 
-        vc = vocab_config
-        self.vocab_src = Vocabulary(
-            vc['source_dict'],
-            PAD_ID=vc['PAD_ID'],
-            SOS_ID=vc['SOS_ID'],
-            EOS_ID=vc['EOS_ID'],
-            UNK_ID=vc['UNK_ID'])
-        self.vocab_trg = Vocabulary(
-            vc['target_dict'],
-            PAD_ID=vc['PAD_ID'],
-            SOS_ID=vc['SOS_ID'],
-            EOS_ID=vc['EOS_ID'],
-            UNK_ID=vc['UNK_ID'])
+        self.vocab_src = vocab_source
+        self.vocab_trg = vocab_target
         
         self.batch_capacity = batch_capacity
         
@@ -183,7 +173,7 @@ class InferenceBase:
     
 
     def gen_sents2hypotheses(
-            self, x, beam_size, length_penalty=None, prefix=None, maxlen_ratio=1.5):
+            self, x, beam_size, length_penalty=None, prefix=None, maxlen_ratio=2.0):
         """
         Returns:
             yield hypos_and_scores: (str[], float[])
@@ -260,7 +250,7 @@ class InferenceBase:
                     print(i, (time.time() - t)/i)
 
 
-def main(argv):
+def main(argv, in_fp):
     p = argparse.ArgumentParser()
     p.add_argument('--dir', '-d', type=str, default='.')
     p.add_argument('--checkpoint', '--ckpt', type=str)
@@ -272,7 +262,7 @@ def main(argv):
     p.add_argument('--length_penalty', type=float)
     p.add_argument('--debug', action='store_true')
     p.add_argument('--debug_eager_function', action='store_true')
-    p.add_argument('--progress_frequency', type=int, default=10**10)
+    p.add_argument('--progress_report_frequency', '--progress', type=int, default=10**10)
     args = p.parse_args(argv)
 
     if args.debug:
@@ -286,7 +276,7 @@ def main(argv):
         model_config = json.load(f)
     
     with open(f'{args.dir}/vocab_config.json') as f:
-        vocab_config = json.load(f)
+        vc = json.load(f)
     
     # Transformer Model
     model = Transformer.from_config(model_config)
@@ -299,8 +289,23 @@ def main(argv):
     ckpt.restore(ckpt_path)
     logger.info(f'Checkpoint: {ckpt_path}')
 
+    # Vocabulary
+    vocab_src = Vocabulary(
+        args.dir + '/' + vc['source_dict'],
+        PAD_ID=vc['PAD_ID'],
+        SOS_ID=vc['SOS_ID'],
+        EOS_ID=vc['EOS_ID'],
+        UNK_ID=vc['UNK_ID'])
+    vocab_trg = Vocabulary(
+        args.dir + '/' + vc['target_dict'],
+        PAD_ID=vc['PAD_ID'],
+        SOS_ID=vc['SOS_ID'],
+        EOS_ID=vc['EOS_ID'],
+        UNK_ID=vc['UNK_ID'])
+
+
     # Inference Class
-    inference = InferenceBase(model, vocab_config, args.capacity)
+    inference = InferenceBase(model, vocab_src, vocab_trg, args.capacity)
 
     if args.mode == 'translate':
         if args.length_penalty is None:
@@ -309,9 +314,9 @@ def main(argv):
             lp_fn = get_len_penalty_fn(args.length_penalty)
         
         if args.prefix:
-            x, prefix = fork_iterable((l.split('\t') for l in sys.stdin), 2)
+            x, prefix = fork_iterable((l.split('\t') for l in in_fp), 2)
         else:
-            x, prefix = sys.stdin, None
+            x, prefix = in_fp, None
 
         t = None
         for i,line in enumerate(inference.gen_sents2sents(
@@ -321,10 +326,10 @@ def main(argv):
                 prefix=prefix)):
             print(line)
             if t is None: t = time.time()
-            if i > 0 and i % args.progress_frequency == 0:
+            if i > 0 and i % args.progress_report_frequency == 0:
                 logger.debug(f'{i}, {(time.time() - t)/i}')
     elif args.mode == 'test':
         inference.unit_test()
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    main(sys.argv[1:], sys.stdin)
