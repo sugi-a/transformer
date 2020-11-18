@@ -68,8 +68,8 @@ class RelativePositionMultiheadSelfAttention(keras.layers.Layer):
         rel_pos += self.max_dist
 
         # Embedding matrix.
-        # [L_q, L_k, head_size] If unique_per_head
-        # [L_q, L_k, nheads, head_size] Otherwise
+        # [L_q, L_k, nheads, head_size] If unique_per_head
+        # [L_q, L_k, head_size] Otherwise
         embeddings = tf.gather(self.pos_emb, rel_pos)
 
         # Make bias. [batch, nheads, L_q, L_k]
