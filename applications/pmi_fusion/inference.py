@@ -7,7 +7,7 @@ from collections import deque
 
 import tensorflow as tf
 from tensorflow import keras, nest
-import numppy as np
+import numpy as np
 
 from ...utils.beam_search import beam_search
 from ...vanilla import layers as vl
@@ -36,9 +36,10 @@ def gen_lines_to_docs(line_iterable):
 
 
 def gen_docs_to_lines(docs_iterable):
-    for doc in docs_iterable:
+    for i, doc in enumerate(docs_iterable):
+        if i > 0:
+            yield ''
         yield from doc
-        yield ''
 
 
 def recursive_update(target, ref):
@@ -77,18 +78,18 @@ def create_stateful_decoder_TM(model, x, ntiles=None):
 
     if ntiles is not None:
         enc_out, enc_pad_bias = nest.map_structure(
-            lambda x: tf.repeat(x, ntiles, axis=0)
+            lambda x: tf.repeat(x, ntiles, axis=0),
             (enc_out, enc_pad_bias))
 
     state, shape_inv = model.create_cache(tf.shape(enc_out)[0])
     return (
-        model.create_decoder(enc_out, enc_pad_bias, cache),
+        model.create_decoder(enc_out, enc_pad_bias, state),
         state,
         shape_inv
     )
 
 
-def create_stateful_decoder_LM(model, B, ntiles=None, offset=None):
+def create_stateful_decoder_LM(model, B, ntiles=None, offsets=None):
     if ntiles is not None:
         B *= ntiles
     state, shape_inv = model.create_cache(B)
@@ -96,7 +97,7 @@ def create_stateful_decoder_LM(model, B, ntiles=None, offset=None):
         if hasattr(model, 'id_substitutions_'):
             for f, t in model.id_substitutions_:
                 y = tf.where(y == f, t, y)
-        return model(y, training=False, cache=state, offset=None)
+        return model(y, training=False, cache=state, offsets=None)
     return f, state, shape_inv
 
 
@@ -104,8 +105,8 @@ def create_stateful_decoder_CtxLM(model, c, ntiles=None):
     if ntiles is not None:
         c = tf.repeat(c, ntiles, axis=0)
     B = tf.shape(c)[0]
-    offset = count_left_padding(c)
-    f, state, shape_inv = create_stateful_decoder_LM(model, B, offset=offset)
+    offsets = count_left_padding(c)
+    f, state, shape_inv = create_stateful_decoder_LM(model, B, offsets=offsets)
 
     f(c) # Update state
 
@@ -146,6 +147,7 @@ def get_seq_fscore(tm, lm, x, y, c):
 def ctx_aware_beam_search(tm, lm, x, c, beam_size, sos, eos, maxlen):
     B = tf.shape(x)[0]
     K = beam_size
+    sos = tf.broadcast_to(sos, [B])
     dec_tm, state_tm, sinv_tm = create_stateful_decoder_TM(tm, x, K)
     dec_lm, state_lm, sinv_lm = create_stateful_decoder_LM(lm, B, K)
     dec_clm, state_clm, sinv_clm = create_stateful_decoder_CtxLM(lm, c, K)
@@ -161,9 +163,9 @@ def ctx_aware_beam_search(tm, lm, x, c, beam_size, sos, eos, maxlen):
             y)
     
     def perm_batch_fn_(permutation):
-        tm.permute_cache(state_tm)
-        lm.permute_cache(state_lm)
-        clm.permute_cache(state_clm)
+        tm.permute_cache(state_tm, permutation)
+        lm.permute_cache(state_lm, permutation)
+        lm.permute_cache(state_clm, permutation)
     
     def get_state_fn_():
         return state
@@ -192,24 +194,15 @@ class Inference:
             self, 
             transformer_model,
             decoder_language_model,
-            tm_vocab_config,
+            vocab_source,
+            vocab_target,
             batch_capacity):
 
         self.tm = transformer_model
         self.lm = decoder_language_model
         
-        self.vocab_src = Vocabulary(
-            vc['source_dict'],
-            PAD_ID=vc['PAD_ID'],
-            SOS_ID=vc['SOS_ID'],
-            EOS_ID=vc['EOS_ID'],
-            UNK_ID=vc['UNK_ID'])
-        self.vocab_trg = Vocabulary(
-            vc['target_dict'],
-            PAD_ID=vc['PAD_ID'],
-            SOS_ID=vc['SOS_ID'],
-            EOS_ID=vc['EOS_ID'],
-            UNK_ID=vc['UNK_ID'])
+        self.vocab_src = vocab_source
+        self.vocab_trg = vocab_target
         
         self.batch_capacity = batch_capacity
 
@@ -275,11 +268,13 @@ class Inference:
     def translate_doc(self, doc, n_ctx, beam_size, maxlen_ratio=1.5):
         src_v, trg_v = self.vocab_src, self.vocab_trg
         def make_x_(src):
-            return [src_v.line2IDs(src)]
+            return tf.constant([src_v.line2IDs(src)], tf.int32)
         
         def make_c_(ctx):
-            c = [trg_v.EOS_ID] + trg_v.line2IDs(ctx)
-            return [c]
+            if len(ctx) == 0:
+                return tf.constant([[]], tf.int32)
+            else:
+                return tf.constant([trg_v.tokens2IDs(ctx)], tf.int32)
 
         out = []
         ctx_q = deque()
@@ -292,25 +287,82 @@ class Inference:
             x = make_x_(sent)
             c = make_c_(ctx_q)
             paths, _ = self.comp_translate(x, c, beam_size, maxlen_ratio)
-            trans = trg_v.IDs2text(paths[0][:1])[0]
+            paths = paths.numpy()
+            trans_toks = trg_v.IDs2tokens1D(paths[0][0])
 
-            out.append(trans)
+            out.append(' '.join(trans_toks))
 
-            len_q.append(len(trans))
-            ctx_q.extend(trans)
+            len_q.append(1 + len(trans_toks))
+            ctx_q.append(trg_v.ID2tok[trg_v.EOS_ID])
+            ctx_q.extend(trans_toks)
 
             if len(len_q) > n_ctx:
                 l = len_q.popleft()
                 for _ in range(l):
                     ctx_q.popleft()
 
-        return trans
+        return out
+
 
     def translate_docs(
             self, docs, n_ctx, beam_size, maxlen_ratio=1.5):
         return [self.translate_doc(doc, n_ctx, beam_size, maxlen_ratio)
             for doc in docs]
 
+
+    def translate_docs_batch(self, docs, n_ctx, beam_size, maxlen_ratio=1.5):
+        src_v, trg_v = self.vocab_src, self.vocab_trg
+        def make_batches_(src_sents, ctx_sents):
+            o = dp.gen_line2IDs_multi(
+                zip(src_sents, ctx_sents),
+                (src_v, trg_v))
+            o = dp.gen_batch_of_capacity_multi(o, self.batch_capacity)
+            o = dp.gen_pad_batch_multi(o)
+            o = dp.gen_list2numpy_nested(o)
+            return o
+
+        docs = [deque(doc) for doc in docs]
+        out = [[] for i in range(len(docs))]
+        ctx_q = [deque() for i in range(len(docs))]
+        len_q = [deque() for i in range(len(docs))]
+
+        t = time.time()
+        ntotal = sum(map(len, docs))
+        nprocessed = 0
+
+        while True:
+            idx = [i for i, doc in enumerate(docs) if len(doc) > 0]
+
+            if len(idx) == 0:
+                break
+
+            src_sents = [docs[i].popleft() for i in idx]
+            ctx_sents = [' '.join(ctx_q[i]) for i in idx]
+
+            x_cs = make_batches_(src_sents, ctx_sents)
+            os = []
+            for x, c in x_cs:
+                paths, _ = self.comp_translate(x, c, beam_size, maxlen_ratio)
+                paths = paths[:, 0].numpy()
+                trans_toks = trg_v.IDs2tokens2D(paths)
+                os.extend(trans_toks)
+
+            assert len(os) == len(idx)
+            for i, o in zip(idx, os):
+                out[i].append(' '.join(o))
+                len_q[i].append(1 + len(o))
+                ctx_q[i].append(trg_v.ID2tok[trg_v.EOS_ID])
+                ctx_q[i].extend(o)
+                
+                if len(len_q[i]) > n_ctx:
+                    l = len_q[i].popleft()
+                    for _ in range(l):
+                        ctx_q[i].popleft()
+
+            nprocessed += len(idx)
+            logger.debug(f'{nprocessed}/{ntotal}\t{(time.time()-t)/nprocessed}')
+
+        return out
 
     def gen_fscore(self, x, y, c):
         """
@@ -337,21 +389,18 @@ class Inference:
                     print(i, (time.time() - t)/i)
 
 
-def load_tm(tm_dir, ckpt):
+def load_tm(tm_dir, checkpoint):
     # Translation model Config
     with open(f'{tm_dir}/model_config.json') as f:
         model_config = json.load(f)
     
-    with open(f'{tm_dir}/vocab_config.json') as f:
-        vocab_config = json.load(f)
-    
     # Transformer Model
     model = vl.Transformer.from_config(model_config)
     ckpt = tf.train.Checkpoint(model=model)
-    if ckpt is None:
+    if checkpoint is None:
         ckpt_path = tf.train.latest_checkpoint(f'{tm_dir}/checkpoint_best')
     else:
-        ckpt_path = ckpt
+        ckpt_path = checkpoint
     assert ckpt_path is not None
     ckpt.restore(ckpt_path)
     logger.info(f'Checkpoint: {ckpt_path}')
@@ -359,18 +408,18 @@ def load_tm(tm_dir, ckpt):
     return model
 
 
-def load_lm(lm_dir, ckpt):
+def load_lm(lm_dir, checkpoint):
     # Translation model Config
     with open(f'{lm_dir}/model_config.json') as f:
         model_config = json.load(f)
     
     # Transformer Model
-    model = vl.DecoderLanguageModel.from_config(model_config)
+    model = ll.DecoderLanguageModel.from_config(model_config)
     ckpt = tf.train.Checkpoint(model=model)
-    if ckpt is None:
+    if checkpoint is None:
         ckpt_path = tf.train.latest_checkpoint(f'{lm_dir}/checkpoint_best')
     else:
-        ckpt_path = ckpt
+        ckpt_path = checkpoint
     assert ckpt_path is not None
     ckpt.restore(ckpt_path)
     logger.info(f'Checkpoint: {ckpt_path}')
@@ -378,7 +427,7 @@ def load_lm(lm_dir, ckpt):
     return model
 
 
-def main(argv):
+def main(argv, in_fp):
     p = argparse.ArgumentParser()
     p.add_argument('tm_dir', type=str)
     p.add_argument('lm_dir', type=str)
@@ -400,18 +449,34 @@ def main(argv):
 
     if args.debug_eager_function:
         tf.config.run_functions_eagerly(True)
-    
+
     tm = load_tm(args.tm_dir, args.tm_checkpoint)
     lm = load_lm(args.lm_dir, args.lm_checkpoint)
 
+    with open(f'{args.tm_dir}/vocab_config.json') as f:
+        vc = json.load(f)
+
+    vocab_src = Vocabulary(
+        args.tm_dir + '/' + vc['source_dict'],
+        PAD_ID=vc['PAD_ID'],
+        SOS_ID=vc['SOS_ID'],
+        EOS_ID=vc['EOS_ID'],
+        UNK_ID=vc['UNK_ID'])
+    vocab_trg = Vocabulary(
+        args.tm_dir + '/' + vc['target_dict'],
+        PAD_ID=vc['PAD_ID'],
+        SOS_ID=vc['SOS_ID'],
+        EOS_ID=vc['EOS_ID'],
+        UNK_ID=vc['UNK_ID'])
+    
     # Inference Class
-    inference = Inference(tm, lm, vocab_config, args.capacity)
+    inference = Inference(tm, lm, vocab_src, vocab_trg, args.capacity)
 
     if args.mode == 'translate':
-        docs = gen_lines_to_docs(sys.stdin)
-        out_docs = inference.translate_docs(
+        docs = gen_lines_to_docs(in_fp)
+        out_docs = inference.translate_docs_batch(
             docs,
-            n_ctx=args.nctx,
+            n_ctx=args.n_ctx,
             beam_size=args.beam_size,
             maxlen_ratio=1.5)
         for line in gen_docs_to_lines(out_docs):
@@ -420,4 +485,4 @@ def main(argv):
         inference.unit_test()
 
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    main(sys.argv[1:], sys.stdin)
