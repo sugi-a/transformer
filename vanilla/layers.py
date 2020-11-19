@@ -583,7 +583,7 @@ class Decoder(keras.layers.Layer):
             self_attn_bias += offset_bias
 
             # [ML, E] -> [B, r-l, E]
-            indices = tf.range(l, r)[None] + offsets[:, None]
+            indices = tf.range(l, r)[None] - offsets[:, None]
             pos_enc = tf.gather(self.pos_enc, indices) \
                 if hasattr(self, 'pos_enc') else None
             pos_emb = tf.gather(self.pos_emb, indices) \
