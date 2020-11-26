@@ -62,7 +62,7 @@ def list2numpy_nested(nested):
     elif isinstance(nested, tuple):
         new = tuple(list2numpy_nested(v) for v in nested)
     elif isinstance(nested, list):
-        new = np.array(nested)
+        new = np.array(nested, dtype=int)
     else:
         new = nested
 
