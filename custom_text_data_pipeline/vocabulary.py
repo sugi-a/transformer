@@ -39,6 +39,12 @@ class Vocabulary:
             for ids_ in IDs]
 
 
+    def drop_ctrls_in_IDs2D(self, IDs):
+        return [
+            [id for id in seq if not id in self.ctrls]
+            for seq in IDs]
+
+
     def line2IDs(self, line):
         return self.tokens2IDs(line.split())
 
