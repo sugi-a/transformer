@@ -134,7 +134,7 @@ class InferenceBase:
         with tf.device('/gpu:0'):
             # [B, L-1, V]
             logits = self.model(c, x, y_in, training=False)
-            logp_dist = tf.nn.softmax(logits)
+            logp_dist = tf.nn.log_softmax(logits)
 
             # [B, L-1] <- [B, L-1, V]
             logp = tf.gather(logp_dist, y_out, batch_dims=2)
@@ -142,7 +142,7 @@ class InferenceBase:
             return logp * create_mask(y_out)
 
 
-    @tf.function(input_signature=[TSpec([None, None], TI32)]*2)
+    @tf.function(input_signature=[TSpec([None, None], TI32)]*3)
     def comp_seq_logp(self, c, x, y):
         with tf.device('/gpu:0'):
             tok_logp = self.comp_token_logp(c, x, y[:, :-1], y[:, 1:])
@@ -185,17 +185,16 @@ class InferenceBase:
             yield hypos[0]
     
 
-    def gen_sents2logps(self, src, y):
-        c_x = map(split_c_x, src)
-        c_x_y = (c_x_ + (y_,) for c_x_, y_ in zip(c_x, y))
-
+    def gen_sents2logps(self, c_x_y_lines):
         dataset = (
-            self.create_dataset_multi(c_x_y, (self.vocab_src, self.vocab_src, self.vocab_trg))
+            self.create_dataset_multi(c_x_y_lines, (self.vocab_src, self.vocab_src, self.vocab_trg))
             .prefetch(1)
-            .map(lambda *b: self.comp_seq_logp(b[0], b[1], b[2]))
-            .unbatch().prefetch(1)
         )
-        yield from dataset
+
+        for c, x, y in dataset:
+            logps = self.comp_seq_logp(c, x, y)
+            for logp in logps.numpy():
+                yield logp
 
 
     def sents2ppl(self, src, y):
@@ -295,8 +294,15 @@ def main(argv, in_fp):
             if t is None: t = time.time()
             if i > 0 and i % args.progress_frequency == 0:
                 logger.debug(f'{i}, {(time.time() - t)/i}')
-    elif args.mode == 'test':
-        inference.unit_test()
+    elif args.mode == 'logp':
+        def split_fn_(l):
+            c,x,y = l.split('\t')
+            return c,x,y
+
+        c_x_y_lines = map(split_fn_, in_fp)
+        for logp in inference.gen_sents2logps(c_x_y_lines):
+            print(logp)
+
 
 if __name__ == '__main__':
     main(sys.argv[1:], sys.stdin)

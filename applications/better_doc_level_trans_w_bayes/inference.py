@@ -262,6 +262,17 @@ class Inference:
     
 
     @tf.function(input_signature=[SI2, SI2])
+    def comp_fw_logp(self, x, y):
+        y_in, y_out = y[:, :-1], y[:, 1:]
+        logits = self.fw_tm(x, y_in, training=False)
+        logp_dist = tf.nn.log_softmax(logits)
+
+        logp = tf.gather(logp_dist, y_out, batch_dims=2) * create_mask(y_out)
+
+        return tf.reduce_sum(logp, axis=1)
+
+
+    @tf.function(input_signature=[SI2, SI2])
     def comp_bw_logp(self, x, y):
         x_in, x_out = x[:, :-1], x[:, 1:]
         logits = self.bw_tm(y, x_in, training=False)
@@ -270,6 +281,39 @@ class Inference:
         logp = tf.gather(logp_dist, x_out, batch_dims=2) * create_mask(x_out)
 
         return tf.reduce_sum(logp, axis=1)
+    
+
+    @tf.function(input_signature=[SI2, SI2])
+    def comp_cond_LM(self, ctx, y):
+        # SOS substitution
+        y = tf.where(y == self.vocab_trg.SOS_ID, self.vocab_trg.EOS_ID, y)
+        ctx = tf.where(ctx == self.vocab_trg.SOS_ID, self.vocab_trg.EOS_ID, ctx)
+
+        ctx, offsets = vl.transfer_padding_to_left(ctx)
+        y_in, y_out = y[:, :-1], y[:, 1:]
+        
+        joint_input = tf.concat([ctx, y_in], axis=1)
+        logits = self.lm(joint_input, training=False, offsets=offsets)
+        logits = logits[:, -tf.shape(y_out)[1]:]
+        logp_distr = tf.nn.log_softmax(logits)
+
+        logp = tf.gather(logp_distr, y_out, batch_dims=2) * create_mask(y_out)
+        return tf.reduce_sum(logp, axis=1)
+
+
+    @tf.function(input_signature=[SI2, SI2, SI2, SF0, SF0, SF0])
+    def comp_rerank_score(self, x, y, c, l1, l2, l3):
+        """c must not include the separator symbol at the end"""
+        # [B]
+        fw_score = self.comp_fw_logp(x, y)
+        bw_score = self.comp_bw_logp(x, y)
+        lm_score = self.comp_cond_LM(c, y)
+        lens = tf.math.reduce_sum(create_mask(y[:, 1:]), axis=1)
+        return (
+            lm_score
+            + l1 * fw_score
+            + l2 * bw_score
+            + l3 * lens)
 
 
     def translate_doc(
@@ -281,13 +325,13 @@ class Inference:
         LW = lattice_width
         D = len(doc)
 
-        def wrap_(lines, vocab, sos=True, eos=True):
+        def wrap_(lines, vocab, sos=None, eos=None):
             o = lines
-            SOS = vocab.ID2tok[vocab.SOS_ID]
-            EOS = vocab.ID2tok[vocab.EOS_ID]
-            if sos:
+            SOS = vocab.ID2tok[vocab.SOS_ID] if sos is None else sos
+            EOS = vocab.ID2tok[vocab.EOS_ID] if eos is None else eos
+            if sos is not False:
                 o = map(lambda x: f'{SOS} {x}', o)
-            if eos:
+            if eos is not False:
                 o = map(lambda x: f'{x} {EOS}', o)
             return o
 
@@ -307,7 +351,7 @@ class Inference:
             h_, s_ = self.comp_fw_translate(batch, lattice_width, maxlen_ratio)
             for b in h_.numpy():
                 # b: <[LW, L]>
-                hypos.append(trg_v.IDs2text(b), skip_control_symbols=True)
+                hypos.append(trg_v.IDs2text(b, skip_control_symbols=True))
             fw_scores.extend(s_.numpy().tolist())
         
         # <D, LW>
@@ -317,8 +361,8 @@ class Inference:
         bw_scores = []
         # [D * LW]
         hypos_flat = list(chain(*hypos))
+        hypos_flat = wrap_(hypos_flat, trg_v)
         src_tiled = list(chain.from_iterable((sent,)*LW for sent in doc))
-        src_tiled = wrap_(src_tiled)
         for x, y in make_batches_((src_tiled, hypos_flat), (src_v, trg_v)):
             bw_scores.extend(self.comp_bw_logp(x, y))
 
@@ -326,10 +370,12 @@ class Inference:
         bw_scores = np.array(bw_scores).reshape([D, LW])
 
         # Beam search on lattice. [D]
+        EOS = trg_v.ID2tok[trg_v.EOS_ID]
+        hypo_ids = [list(dp.gen_line2IDs(wrap_(h_, None, sos=EOS, eos=False), trg_v)) for h_ in hypos]
         idx = ltc_search(
-            hypos,
+            hypo_ids,
             fw_scores, bw_scores,
-            fn_cond_lm,
+            self.comp_cond_LM,
             l1, l2, l3,
             lattice_beam_size, n_ctx)
 
@@ -343,16 +389,39 @@ class Inference:
             lattice_width, lattice_beam_size,
             l1, l2, l3,
             maxlen_ratio=2.0):
-        return [
-            self.translate_doc(
-                doc,
-                n_ctx,
-                lattice_width,
-                lattice_beam_size,
-                l1, l2, l3,
-                maxlen_ratio)
-            for doc in docs]
+        res = []
+        t = time.time()
+        docs = list(docs)
+        total = sum(map(len, docs))
+        n = 0
+        for doc in docs:
+            res.append(
+                self.translate_doc(
+                    doc,
+                    n_ctx,
+                    lattice_width,
+                    lattice_beam_size,
+                    l1, l2, l3,
+                    maxlen_ratio)
+                )
+            n += len(doc)
+            logger.debug(f'{n}/{total}\t{(time.time() - t)/n}')
+        return res
 
+
+    def gen_reranking_score(self, tab_sep_x_c_y_lines, l1, l2, l3):
+        def split_fn_(l):
+            a,b,c = l.split('\t')
+            return a,b,c
+
+        data_gen = self.create_data_gen_multi(
+            map(split_fn_, tab_sep_x_c_y_lines),
+            (self.vocab_src, self.vocab_trg, self.vocab_trg))
+        
+        for x, c, y in dp.gen_list2numpy_nested(data_gen()):
+            for s in self.comp_rerank_score(
+                    x, c=c, y=y, l1=l1, l2=l2, l3=l3).numpy():
+                yield s
 
 
 def load_tm(tm_dir, checkpoint):
@@ -405,7 +474,7 @@ def main(argv, in_fp):
     p.add_argument('--bw_tm_checkpoint', '--bw_ckpt', type=str)
     p.add_argument('--lm_checkpoint', '--lm_ckpt', type=str)
     p.add_argument('--capacity', type=int, default=16384)
-    p.add_argument('--mode', choices=['translate', 'test'], default='translate')
+    p.add_argument('--mode', choices=['translate', 'rerank_score'], default='translate')
     p.add_argument('--lattice_width', type=int, default=20)
     p.add_argument('--lattice_beam_size', type=int, default=5)
     p.add_argument('--n_ctx', type=int, default=3)
@@ -451,13 +520,18 @@ def main(argv, in_fp):
             docs,
             n_ctx=args.n_ctx,
             lattice_width=args.lattice_width,
-            lattice_beam_size=lattice_beam_size,
+            lattice_beam_size=args.lattice_beam_size,
             l1=args.l1,
             l2=args.l2,
             l3=args.l3,
             maxlen_ratio=2.0)
         for line in gen_docs_to_lines(out_docs):
             print(line)
+    elif args.mode == 'rerank_score':
+        for s in inference.gen_reranking_score(
+                in_fp, args.l1, args.l2, args.l3):
+            print(s)
+
 
 if __name__ == '__main__':
     main(sys.argv[1:], sys.stdin)
