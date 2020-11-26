@@ -131,26 +131,16 @@ class InferenceBase:
         return _cache[pfx is None](x, pfx, beam_size, maxlen_ratio)
     
 
-    @deco_cache_provider
-    def comp_token_logp(self, x, y_in, y_out, offsets=None, _cache=None):
-        def f(x, y_in, y_out, offsets):
-            with tf.device('/gpu:0'):
-                # [B, L-1, V]
-                logits = self.model(x, y_in, training=False, offsets=offsets)
-                logp_dist = tf.nn.softmax(logits)
+    def comp_token_logp(self, x, y_in, y_out):
+        with tf.device('/gpu:0'):
+            # [B, L-1, V]
+            logits = self.model(x, y_in, training=False)
+            logp_dist = tf.nn.log_softmax(logits)
 
-                # [B, L-1] <- [B, L-1, V]
-                logp = tf.gather(logp_dist, y_out, batch_dims=2)
+            # [B, L-1] <- [B, L-1, V]
+            logp = tf.gather(logp_dist, y_out, batch_dims=2)
 
-                return logp * create_mask(y_out)
-
-        if len(_cache) == 0:
-            M1 = TSpec([None], tf.int32)
-            M2 = TSpec([None, None], tf.int32)
-            _cache[True] = get_signed_func_wrapper(f, [M2, M2, M2, None])
-            _cache[False] = get_signed_func_wrapper(f, [M2, M2, M2, M1])
-
-        return _cache[offsets is None](x, y_in, y_out, offsets)
+            return logp * create_mask(y_out)
 
 
     @tf.function(input_signature=[TSpec([None, None], TI32)]*2)
@@ -205,14 +195,17 @@ class InferenceBase:
             yield hypos[0]
     
 
-    def gen_sents2logps(self, x, y):
+    def gen_sents2logps(self, x, y, normalize=False):
         dataset = (
             self.create_dataset_multi((x, y), (self.vocab_src, self.vocab_trg))
             .prefetch(1)
-            .map(lambda *b: self.comp_seq_logp(b[0], b[1]))
-            .unbatch().prefetch(1)
         )
-        yield from dataset
+        for x, y in dataset:
+            seq_logp = self.comp_seq_logp(x, y)
+            if normalize:
+                seq_logp /= tf.reduce_sum(create_mask(y[:, 1:]), axis=1)
+            for s in seq_logp.numpy():
+                yield s
 
 
     def sents2ppl(self, x, y):
@@ -263,6 +256,7 @@ def main(argv, in_fp):
     p.add_argument('--debug', action='store_true')
     p.add_argument('--debug_eager_function', action='store_true')
     p.add_argument('--progress_report_frequency', '--progress', type=int, default=10**10)
+    p.add_argument('--normalize', action='store_true')
     args = p.parse_args(argv)
 
     if args.debug:
@@ -328,8 +322,16 @@ def main(argv, in_fp):
             if t is None: t = time.time()
             if i > 0 and i % args.progress_report_frequency == 0:
                 logger.debug(f'{i}, {(time.time() - t)/i}')
-    elif args.mode == 'test':
-        inference.unit_test()
+    elif args.mode == 'logp':
+        def split_fn_(l):
+            a,b = l.split('\t')
+            return a,b
+        x_y = list(map(split_fn_, in_fp))
+        x, y = zip(*x_y)
+        for i,logp in enumerate(inference.gen_sents2logps(x, y, normalize=args.normalize)):
+            if i % 1000 == 0:
+                logger.debug(i)
+            print(logp)
 
 if __name__ == '__main__':
     main(sys.argv[1:], sys.stdin)

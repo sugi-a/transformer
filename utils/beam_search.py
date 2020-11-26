@@ -16,7 +16,13 @@ def length_penalty(length, alpha):
     Returns:
         [shape(length), float32]
     """
-    return tf.cast(tf.pow((5 + length)/(1 + 5), alpha), dtype=tf.float32)
+    a = tf.cast((5 + length)/(1 + 5), tf.float32)
+    b = tf.cast(alpha, tf.float32)
+    return tf.cast(tf.pow(a, b), tf.float32)
+
+
+def create_length_penalty_fn(alpha):
+    return lambda length: length_penalty(length, alpha)
 
 
 def beam_search(
